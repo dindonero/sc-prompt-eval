@@ -1,0 +1,158 @@
+{
+  "version": "3.0",
+  "description": "DASP10-aligned vulnerability scenarios for GPTScan-style analysis",
+  "reference": "DASP Top 10 (https://dasp.co/) + GPTScan methodology (ICSE 2024)",
+  "scenarios": [
+    {
+      "id": "reentrancy",
+      "name": "Reentrancy",
+      "scenario": "make an external call (call, send, transfer) to another address before updating state variables",
+      "property": "state variables (e.g., balances, flags) are modified AFTER the external call, allowing re-entry before state is updated",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["withdraw", "send", "transfer", "call", "refund", "claim", "payout"],
+      "filtering_expressions": ["\\.call\\s*\\(", "\\.call\\.value\\s*\\(", "\\.send\\s*\\(", "\\.transfer\\s*\\(", "delegatecall\\s*\\("],
+      "static_check": "OC",
+      "dasp_category": "reentrancy",
+      "severity_default": "critical"
+    },
+    {
+      "id": "access_control",
+      "name": "Access Control",
+      "scenario": "perform sensitive operations such as selfdestruct, ownership changes, fund transfers, or state modifications",
+      "property": "there is no access control modifier (onlyOwner, etc.) or msg.sender verification to restrict who can call this function",
+      "filtering_type": ["FNK", "FCE", "FNM"],
+      "filtering_keywords": ["selfdestruct", "suicide", "kill", "destroy", "withdraw", "transfer", "setOwner", "changeOwner", "initialize", "init"],
+      "filtering_expressions": ["selfdestruct\\s*\\(", "suicide\\s*\\(", "tx\\.origin", "delegatecall\\s*\\("],
+      "static_check": "VC",
+      "dasp_category": "access_control",
+      "severity_default": "critical"
+    },
+    {
+      "id": "arithmetic",
+      "name": "Arithmetic Issues",
+      "scenario": "perform arithmetic operations (addition, subtraction, multiplication) on integer variables",
+      "property": "the arithmetic operation is not protected by SafeMath or unchecked block and can overflow or underflow",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["add", "sub", "mul", "div", "transfer", "mint", "burn", "deposit", "withdraw"],
+      "filtering_expressions": ["\\+\\=", "\\-\\=", "\\*\\=", "[^safe]\\+", "[^safe]\\-", "[^safe]\\*"],
+      "static_check": "DF",
+      "dasp_category": "arithmetic",
+      "severity_default": "high"
+    },
+    {
+      "id": "unchecked_low_level_calls",
+      "name": "Unchecked Low Level Calls",
+      "scenario": "use low-level calls (call, send, delegatecall) to transfer ether or invoke external contracts",
+      "property": "the return value of the low-level call is not checked, allowing silent failures that corrupt contract state",
+      "filtering_type": ["FCE"],
+      "filtering_keywords": ["send", "call", "delegatecall", "transfer"],
+      "filtering_expressions": ["\\.call\\s*\\(", "\\.call\\.value\\s*\\(", "\\.send\\s*\\(", "delegatecall\\s*\\("],
+      "static_check": "VC",
+      "dasp_category": "unchecked_low_level_calls",
+      "severity_default": "high"
+    },
+    {
+      "id": "denial_of_service",
+      "name": "Denial of Service",
+      "scenario": "iterate over arrays or mappings, or depend on external call success for critical state transitions",
+      "property": "the iteration can exceed block gas limit, or an external call failure (revert) can block contract functionality permanently",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["distribute", "refund", "payout", "batch", "all", "loop"],
+      "filtering_expressions": ["for\\s*\\(", "while\\s*\\(", "require\\s*\\([^)]*\\.send", "require\\s*\\([^)]*\\.call"],
+      "static_check": "DF",
+      "dasp_category": "denial_of_service",
+      "severity_default": "high"
+    },
+    {
+      "id": "bad_randomness",
+      "name": "Bad Randomness",
+      "scenario": "generate random numbers or make decisions based on unpredictable values for games, lotteries, or selection",
+      "property": "the randomness source is predictable (block.timestamp, blockhash, block.difficulty, block.number) and can be manipulated by miners",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["random", "lottery", "winner", "select", "pick", "draw", "bet", "guess"],
+      "filtering_expressions": ["block\\.timestamp", "block\\.blockhash", "blockhash\\s*\\(", "block\\.difficulty", "block\\.number", "now"],
+      "static_check": "DF",
+      "dasp_category": "bad_randomness",
+      "severity_default": "high"
+    },
+    {
+      "id": "front_running",
+      "name": "Front Running",
+      "scenario": "reward users based on submitted values (solutions, bids, prices) or process transactions in order-dependent manner",
+      "property": "the function's outcome depends on transaction ordering and submitted values are visible in mempool before execution, allowing attackers to front-run",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["solve", "submit", "bid", "buy", "sell", "swap", "approve", "commit", "reveal"],
+      "filtering_expressions": ["keccak256\\s*\\(", "sha3\\s*\\(", "transfer\\s*\\(", "msg\\.value"],
+      "static_check": "FA",
+      "dasp_category": "front_running",
+      "severity_default": "medium"
+    },
+    {
+      "id": "time_manipulation",
+      "name": "Time Manipulation",
+      "scenario": "use timestamps (block.timestamp, now) for critical logic such as deadlines, time locks, or conditional execution",
+      "property": "the timestamp is used in security-critical comparisons and miners can manipulate block.timestamp within ~15 second tolerance",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["lock", "unlock", "deadline", "expire", "time", "duration", "period", "delay"],
+      "filtering_expressions": ["block\\.timestamp", "now\\s*[<>=!]", "now\\s*\\+", "now\\s*\\-"],
+      "static_check": "VC",
+      "dasp_category": "time_manipulation",
+      "severity_default": "medium"
+    },
+    {
+      "id": "short_addresses",
+      "name": "Short Address Attack",
+      "scenario": "accept address parameters and perform token transfers or balance operations",
+      "property": "the function does not validate input data length (msg.data.length) which allows short address attack via malformed calldata padding",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["transfer", "transferFrom", "send", "approve"],
+      "filtering_expressions": ["address\\s+\\w+"],
+      "filtering_expressions_negative": ["msg\\.data\\.length"],
+      "static_check": "VC",
+      "dasp_category": "short_addresses",
+      "severity_default": "medium"
+    },
+    {
+      "id": "other",
+      "name": "Other Vulnerabilities",
+      "scenario": "use storage pointers, uninitialized variables, or complex state management patterns",
+      "property": "the code exhibits patterns that can lead to unintended behavior: uninitialized storage pointers, shadowed variables, or incorrect storage layout",
+      "filtering_type": ["FNK", "FCE"],
+      "filtering_keywords": ["storage", "memory", "register", "unlock", "lock"],
+      "filtering_expressions": ["\\[\\d+\\]\\s*=", "storage\\s+\\w+"],
+      "static_check": "DF",
+      "dasp_category": "other",
+      "severity_default": "medium"
+    }
+  ],
+  "logic_checks": [
+    "State updates after external calls (reentrancy patterns)",
+    "Missing access control on sensitive functions",
+    "Unprotected arithmetic operations",
+    "Unchecked return values from low-level calls",
+    "Unbounded loops or external call dependencies",
+    "Predictable randomness sources",
+    "Transaction order dependencies",
+    "Timestamp-based critical logic",
+    "Input length validation gaps",
+    "Storage pointer and initialization issues"
+  ],
+  "static_check_descriptions": {
+    "DF": "Data Flow - traces variable dependencies using Slither's is_dependent()",
+    "VC": "Value Comparison - checks if variables are compared in require/if conditions",
+    "OC": "Order Check - verifies statement execution order using CFG analysis",
+    "FA": "Function Argument - validates argument sources and taint analysis"
+  },
+  "filtering_type_descriptions": {
+    "FNK": "Function Name contains Keyword",
+    "FNI": "Function Name Invokes (calls another function)",
+    "FCE": "Function Content contains Expression",
+    "FCNE": "Function Content does NOT contain Expression",
+    "FCCE": "Function Content contains Combination of Expressions",
+    "FCNCE": "Function Content does NOT contain Combination",
+    "FPT": "Function Parameters match Types",
+    "FPNC": "Function is Public, Not analyzed with Caller",
+    "FNM": "Function has No access control Modifiers",
+    "FA": "Function Argument validation"
+  }
+}

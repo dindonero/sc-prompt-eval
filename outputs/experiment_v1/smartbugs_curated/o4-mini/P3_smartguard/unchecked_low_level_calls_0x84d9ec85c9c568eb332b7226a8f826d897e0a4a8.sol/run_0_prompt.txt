@@ -1,0 +1,1091 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+///
+/// Auditors: Griff Green & psdev
+///
+/// License: GNU-3
+
+///
+///  later changed
+contract Owned {
+
+    ///
+    /// modifier
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    address public owner;
+
+    ///
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public newOwner;
+
+    ///
+    ///
+    ///  an unowned neutral vault, however that cannot be undone
+    function changeOwner(address _newOwner) onlyOwner {
+        newOwner = _newOwner;
+    }
+    ///
+    ///  Any account or any contract with the ability to call `acceptOwnership`
+    ///  can be used to accept ownership of this contract, including a contract
+    ///  with no other functions
+    function acceptOwnership() {
+        if (msg.sender == newOwner) {
+            owner = newOwner;
+        }
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        _dst.call.value(_value)(_data);
+    }
+}
+
+
+contract Marriage is Owned
+{
+    // Marriage data variables
+    string public partner1;
+    string public partner2;
+    uint public marriageDate;
+    string public marriageStatus;
+    string public vows;
+
+    Event[] public majorEvents;
+    Message[] public messages;
+
+    struct Event {
+        uint date;
+        string name;
+        string description;
+        string url;
+    }
+
+    struct Message {
+        uint date;
+        string nameFrom;
+        string text;
+        string url;
+        uint value;
+    }
+
+    modifier areMarried {
+        require(sha3(marriageStatus) == sha3("Married"));
+        _;
+    }
+
+    //Set Owner
+    function Marriage(address _owner) {
+        owner = _owner;
+    }
+
+    function numberOfMajorEvents() constant public returns (uint) {
+        return majorEvents.length;
+    }
+
+    function numberOfMessages() constant public returns (uint) {
+        return messages.length;
+    }
+
+    // Create initial marriage contract
+    function createMarriage(
+        string _partner1,
+        string _partner2,
+        string _vows,
+        string url) onlyOwner
+    {
+        require(majorEvents.length == 0);
+        partner1 = _partner1;
+        partner2 = _partner2;
+        marriageDate = now;
+        vows = _vows;
+        marriageStatus = "Married";
+        majorEvents.push(Event(now, "Marriage", vows, url));
+        MajorEvent("Marrigage", vows, url);
+    }
+
+    // Set the marriage status if it changes
+    function setStatus(string status, string url) onlyOwner
+    {
+        marriageStatus = status;
+        setMajorEvent("Changed Status", status, url);
+    }
+
+    // Set the IPFS hash of the image of the couple
+    function setMajorEvent(string name, string description, string url) onlyOwner areMarried
+    {
+        majorEvents.push(Event(now, name, description, url));
+        MajorEvent(name, description, url);
+    }
+
+    function sendMessage(string nameFrom, string text, string url) payable areMarried {
+        if (msg.value > 0) {
+            owner.transfer(this.balance);
+        }
+        messages.push(Message(now, nameFrom, text, url, msg.value));
+        MessageSent(nameFrom, text, url, msg.value);
+    }
+
+
+    // Declare event structure
+    event MajorEvent(string name, string description, string url);
+    event MessageSent(string name, string description, string url, u
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, step-by-step rundown of why that snippet is flagged as an unchecked_low_level_call—and how to fix it.
+
+1. What’s wrong with the code?  
+   • In Solidity 0.4.x, `_dst.call.value(_value)(_data)` is a low-level call that:  
+     – forwards all remaining gas  
+     – returns only a boolean (`true` on success, `false` on failure)  
+     – does *not* revert on its own if the callee runs out of gas or hits a `revert()`  
+   • The snippet never inspects that boolean. If the external call fails, `execute` simply continues—no error, no revert, no event.
+
+2. How an attacker (or just a bad target contract) can exploit it  
+   • The owner thinks they’re rescuing tokens or moving Ether via `execute(tokenAddr, 0, data)`.  
+   • The owner is tricked into pointing `_dst` at a contract whose fallback immediately reverts or burns all gas.  
+   • Because there’s no `require(success)`, the failure is swallowed silently. The owner’s monitoring scripts see the transaction “succeed,” but in reality nothing happened on the target contract.  
+
+3. Why silent failures are dangerous  
+   • Funds or state changes the owner expected never occur, potentially locking assets forever.  
+   • Upgrades or critical cross-contract calls silently break, leaving your system in an inconsistent state.  
+   • As the call doesn’t revert, downstream logic in `execute` (if any) still runs, compounding the inconsistency.
+
+4. When this can happen  
+   • You use `.call.value(...)()` on an untrusted or user-supplied address.  
+   • You do *not* check the returned `bool`.  
+   • You rely on that call to do something critical (transfer funds, invoke an upgrade, etc.).
+
+5. How to fix it  
+   Option A: Check the return value and revert on failure  
+     function execute(address _dst, uint _value, bytes _data) onlyOwner {  
+         (bool success, ) = _dst.call.value(_value)(_data);  
+         require(success, "External call failed");  
+     }  
+   Option B: Use higher-level or safer primitives  
+     – For plain Ether transfers, use `transfer` (auto-revert on failure) or `send` with a `require`.  
+     – For calling known external functions, use the typed interface and ABI-encode the call instead of a raw `.call`.
+
+By always checking your low-level calls (or better yet avoiding them when possible), you ensure that any errors bubble up and can’t be silently ignored.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+///
+/// Auditors: Griff Green & psdev
+///
+/// License: GNU-3
+
+///
+///  later changed
+contract Owned {
+
+    ///
+    /// modifier
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    address public owner;
+
+    ///
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public newOwner;
+
+    ///
+    ///
+    ///  an unowned neutral vault, however that cannot be undone
+    function changeOwner(address _newOwner) onlyOwner {
+        newOwner = _newOwner;
+    }
+    ///
+    ///  Any account or any contract with the ability to call `acceptOwnership`
+    ///  can be used to accept ownership of this contract, including a contract
+    ///  with no other functions
+    function acceptOwnership() {
+        if (msg.sender == newOwner) {
+            owner = newOwner;
+        }
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        _dst.call.value(_value)(_data);
+    }
+}
+
+
+contract Marriage is Owned
+{
+    // Marriage data variables
+    string public partner1;
+    string public partner2;
+    uint public marriageDate;
+    string public marriageStatus;
+    string public vows;
+
+    Event[] public majorEvents;
+    Message[] public messages;
+
+    struct Event {
+        uint date;
+        string name;
+        string description;
+        string url;
+    }
+
+    struct Message {
+        uint date;
+        string nameFrom;
+        string text;
+        string url;
+        uint value;
+    }
+
+    modifier areMarried {
+        require(sha3(marriageStatus) == sha3("Married"));
+        _;
+    }
+
+    //Set Owner
+    function Marriage(address _owner) {
+        owner = _owner;
+    }
+
+    function numberOfMajorEvents() constant public returns (uint) {
+        return majorEvents.length;
+    }
+
+    function numberOfMessages() constant public returns (uint) {
+        return messages.length;
+    }
+
+    // Create initial marriage contract
+    function createMarriage(
+        string _partner1,
+        string _partner2,
+        string _vows,
+        string url) onlyOwner
+    {
+        require(majorEvents.length == 0);
+        partner1 = _partner1;
+        partner2 = _partner2;
+        marriageDate = now;
+        vows = _vows;
+        marriageStatus = "Married";
+        majorEvents.push(Event(now, "Marriage", vows, url));
+        MajorEvent("Marrigage", vows, url);
+    }
+
+    // Set the marriage status if it changes
+    function setStatus(string status, string url) onlyOwner
+    {
+        marriageStatus = status;
+        setMajorEvent("Changed Status", status, url);
+    }
+
+    // Set the IPFS hash of the image of the couple
+    function setMajorEvent(string name, string description, string url) onlyOwner areMarried
+    {
+        majorEvents.push(Event(now, name, description, url));
+        MajorEvent(name, description, url);
+    }
+
+    function sendMessage(string nameFrom, string text, string url) payable areMarried {
+        if (msg.value > 0) {
+            owner.transfer(this.balance);
+        }
+        messages.push(Message(now, nameFrom, text, url, msg.value));
+        MessageSent(nameFrom, text, url, msg.value);
+    }
+
+
+    // Declare event structure
+    event MajorEvent(string name, string description, string url);
+    event MessageSent(string name, string description, string url, u
+```
+
+**Security Analysis:**
+Here’s a polished, final write-up of the review:
+
+1. Summary of Findings  
+   • No way for an external attacker (or malicious spouse) to override or corrupt the “marriage” mappings, withdraw funds, or lock out state changes beyond what the owner already could do.  
+   • All state‐modifying methods are gated behind onlyOwner (and areMarried where it matters).  
+
+2. Remaining “odd” bits (owner-only risks, not external exploits)  
+   a. emergency execute(dst, value, data)  
+     – Uses a low-level call and drops the return value.  
+     – Risk: the owner might think an emergency call went through when it silently failed.  
+     – Not exploitable by anyone but the owner; it merely makes owner’s life harder if they rely on the call’s success status.  
+
+   b. sendMessage’s transfer(this.balance)  
+     – Uses .transfer, giving the recipient only 2,300 gas.  
+     – If the owner address is ever set to a contract whose fallback consumes >2,300 gas, every non‐zero donation will revert on forwarding.  
+     – Effect: the contract will accumulate ETH it can’t forward (a DoS on the **forwarding** path).  
+     – Still no outsider can drain or hijack funds, nor can they change marriage records.  
+
+3. Other sanity checks  
+   – No use of tx.origin.  
+   – No unchecked arithmetic (SafeMath not needed here).  
+   – No unprotected reentrancy paths beyond the usual 2,300-gas limit on .transfer.  
+   – No reliance on block timestamps or blockhashes for critical logic.  
+
+4. Conclusion  
+   – From an external attacker’s perspective, **SAFE**.  
+   – The only remaining “risks” are places where the **owner** could shoot themselves in the foot (silent call failures or self-DoS if using a heavy fallback).  
+
+Final Verdict: SAFE
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+///
+/// Auditors: Griff Green & psdev
+///
+/// License: GNU-3
+
+///
+///  later changed
+contract Owned {
+
+    ///
+    /// modifier
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    address public owner;
+
+    ///
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public newOwner;
+
+    ///
+    ///
+    ///  an unowned neutral vault, however that cannot be undone
+    function changeOwner(address _newOwner) onlyOwner {
+        newOwner = _newOwner;
+    }
+    ///
+    ///  Any account or any contract with the ability to call `acceptOwnership`
+    ///  can be used to accept ownership of this contract, including a contract
+    ///  with no other functions
+    function acceptOwnership() {
+        if (msg.sender == newOwner) {
+            owner = newOwner;
+        }
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        _dst.call.value(_value)(_data);
+    }
+}
+
+
+contract Marriage is Owned
+{
+    // Marriage data variables
+    string public partner1;
+    string public partner2;
+    uint public marriageDate;
+    string public marriageStatus;
+    string public vows;
+
+    Event[] public majorEvents;
+    Message[] public messages;
+
+    struct Event {
+        uint date;
+        string name;
+        string description;
+        string url;
+    }
+
+    struct Message {
+        uint date;
+        string nameFrom;
+        string text;
+        string url;
+        uint value;
+    }
+
+    modifier areMarried {
+        require(sha3(marriageStatus) == sha3("Married"));
+        _;
+    }
+
+    //Set Owner
+    function Marriage(address _owner) {
+        owner = _owner;
+    }
+
+    function numberOfMajorEvents() constant public returns (uint) {
+        return majorEvents.length;
+    }
+
+    function numberOfMessages() constant public returns (uint) {
+        return messages.length;
+    }
+
+    // Create initial marriage contract
+    function createMarriage(
+        string _partner1,
+        string _partner2,
+        string _vows,
+        string url) onlyOwner
+    {
+        require(majorEvents.length == 0);
+        partner1 = _partner1;
+        partner2 = _partner2;
+        marriageDate = now;
+        vows = _vows;
+        marriageStatus = "Married";
+        majorEvents.push(Event(now, "Marriage", vows, url));
+        MajorEvent("Marrigage", vows, url);
+    }
+
+    // Set the marriage status if it changes
+    function setStatus(string status, string url) onlyOwner
+    {
+        marriageStatus = status;
+        setMajorEvent("Changed Status", status, url);
+    }
+
+    // Set the IPFS hash of the image of the couple
+    function setMajorEvent(string name, string description, string url) onlyOwner areMarried
+    {
+        majorEvents.push(Event(now, name, description, url));
+        MajorEvent(name, description, url);
+    }
+
+    function sendMessage(string nameFrom, string text, string url) payable areMarried {
+        if (msg.value > 0) {
+            owner.transfer(this.balance);
+        }
+        messages.push(Message(now, nameFrom, text, url, msg.value));
+        MessageSent(nameFrom, text, url, msg.value);
+    }
+
+
+    // Declare event structure
+    event MajorEvent(string name, string description, string url);
+    event MessageSent(string name, string description, string url, u
+```
+
+**Security Analysis:**
+Here’s a polished, final write-up of the review:
+
+1. Summary of Findings  
+   • No way for an external attacker (or malicious spouse) to override or corrupt the “marriage” mappings, withdraw funds, or lock out state changes beyond what the owner already could do.  
+   • All state‐modifying methods are gated behind onlyOwner (and areMarried where it matters).  
+
+2. Remaining “odd” bits (owner-only risks, not external exploits)  
+   a. emergency execute(dst, value, data)  
+     – Uses a low-level call and drops the return value.  
+     – Risk: the owner might think an emergency call went through when it silently failed.  
+     – Not exploitable by anyone but the owner; it merely makes owner’s life harder if they rely on the call’s success status.  
+
+   b. sendMessage’s transfer(this.balance)  
+     – Uses .transfer, giving the recipient only 2,300 gas.  
+     – If the owner address is ever set to a contract whose fallback consumes >2,300 gas, every non‐zero donation will revert on forwarding.  
+     – Effect: the contract will accumulate ETH it can’t forward (a DoS on the **forwarding** path).  
+     – Still no outsider can drain or hijack funds, nor can they change marriage records.  
+
+3. Other sanity checks  
+   – No use of tx.origin.  
+   – No unchecked arithmetic (SafeMath not needed here).  
+   – No unprotected reentrancy paths beyond the usual 2,300-gas limit on .transfer.  
+   – No reliance on block timestamps or blockhashes for critical logic.  
+
+4. Conclusion  
+   – From an external attacker’s perspective, **SAFE**.  
+   – The only remaining “risks” are places where the **owner** could shoot themselves in the foot (silent call failures or self-DoS if using a heavy fallback).  
+
+Final Verdict: SAFE
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+///
+/// Auditors: Griff Green & psdev
+///
+/// License: GNU-3
+
+///
+///  later changed
+contract Owned {
+
+    ///
+    /// modifier
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    address public owner;
+
+    ///
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public newOwner;
+
+    ///
+    ///
+    ///  an unowned neutral vault, however that cannot be undone
+    function changeOwner(address _newOwner) onlyOwner {
+        newOwner = _newOwner;
+    }
+    ///
+    ///  Any account or any contract with the ability to call `acceptOwnership`
+    ///  can be used to accept ownership of this contract, including a contract
+    ///  with no other functions
+    function acceptOwnership() {
+        if (msg.sender == newOwner) {
+            owner = newOwner;
+        }
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        _dst.call.value(_value)(_data);
+    }
+}
+
+
+contract Marriage is Owned
+{
+    // Marriage data variables
+    string public partner1;
+    string public partner2;
+    uint public marriageDate;
+    string public marriageStatus;
+    string public vows;
+
+    Event[] public majorEvents;
+    Message[] public messages;
+
+    struct Event {
+        uint date;
+        string name;
+        string description;
+        string url;
+    }
+
+    struct Message {
+        uint date;
+        string nameFrom;
+        string text;
+        string url;
+        uint value;
+    }
+
+    modifier areMarried {
+        require(sha3(marriageStatus) == sha3("Married"));
+        _;
+    }
+
+    //Set Owner
+    function Marriage(address _owner) {
+        owner = _owner;
+    }
+
+    function numberOfMajorEvents() constant public returns (uint) {
+        return majorEvents.length;
+    }
+
+    function numberOfMessages() constant public returns (uint) {
+        return messages.length;
+    }
+
+    // Create initial marriage contract
+    function createMarriage(
+        string _partner1,
+        string _partner2,
+        string _vows,
+        string url) onlyOwner
+    {
+        require(majorEvents.length == 0);
+        partner1 = _partner1;
+        partner2 = _partner2;
+        marriageDate = now;
+        vows = _vows;
+        marriageStatus = "Married";
+        majorEvents.push(Event(now, "Marriage", vows, url));
+        MajorEvent("Marrigage", vows, url);
+    }
+
+    // Set the marriage status if it changes
+    function setStatus(string status, string url) onlyOwner
+    {
+        marriageStatus = status;
+        setMajorEvent("Changed Status", status, url);
+    }
+
+    // Set the IPFS hash of the image of the couple
+    function setMajorEvent(string name, string description, string url) onlyOwner areMarried
+    {
+        majorEvents.push(Event(now, name, description, url));
+        MajorEvent(name, description, url);
+    }
+
+    function sendMessage(string nameFrom, string text, string url) payable areMarried {
+        if (msg.value > 0) {
+            owner.transfer(this.balance);
+        }
+        messages.push(Message(now, nameFrom, text, url, msg.value));
+        MessageSent(nameFrom, text, url, msg.value);
+    }
+
+
+    // Declare event structure
+    event MajorEvent(string name, string description, string url);
+    event MessageSent(string name, string description, string url, u
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, step-by-step rundown of why that snippet is flagged as an unchecked_low_level_call—and how to fix it.
+
+1. What’s wrong with the code?  
+   • In Solidity 0.4.x, `_dst.call.value(_value)(_data)` is a low-level call that:  
+     – forwards all remaining gas  
+     – returns only a boolean (`true` on success, `false` on failure)  
+     – does *not* revert on its own if the callee runs out of gas or hits a `revert()`  
+   • The snippet never inspects that boolean. If the external call fails, `execute` simply continues—no error, no revert, no event.
+
+2. How an attacker (or just a bad target contract) can exploit it  
+   • The owner thinks they’re rescuing tokens or moving Ether via `execute(tokenAddr, 0, data)`.  
+   • The owner is tricked into pointing `_dst` at a contract whose fallback immediately reverts or burns all gas.  
+   • Because there’s no `require(success)`, the failure is swallowed silently. The owner’s monitoring scripts see the transaction “succeed,” but in reality nothing happened on the target contract.  
+
+3. Why silent failures are dangerous  
+   • Funds or state changes the owner expected never occur, potentially locking assets forever.  
+   • Upgrades or critical cross-contract calls silently break, leaving your system in an inconsistent state.  
+   • As the call doesn’t revert, downstream logic in `execute` (if any) still runs, compounding the inconsistency.
+
+4. When this can happen  
+   • You use `.call.value(...)()` on an untrusted or user-supplied address.  
+   • You do *not* check the returned `bool`.  
+   • You rely on that call to do something critical (transfer funds, invoke an upgrade, etc.).
+
+5. How to fix it  
+   Option A: Check the return value and revert on failure  
+     function execute(address _dst, uint _value, bytes _data) onlyOwner {  
+         (bool success, ) = _dst.call.value(_value)(_data);  
+         require(success, "External call failed");  
+     }  
+   Option B: Use higher-level or safer primitives  
+     – For plain Ether transfers, use `transfer` (auto-revert on failure) or `send` with a `require`.  
+     – For calling known external functions, use the typed interface and ABI-encode the call instead of a raw `.call`.
+
+By always checking your low-level calls (or better yet avoiding them when possible), you ensure that any errors bubble up and can’t be silently ignored.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity >=0.4.11;
+
+contract Owned {
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public owner;
+
+    // This contract only defines a modifier and a few useful functions
+    // The function body is inserted where the special symbol "_" in the
+    // definition of a modifier appears.
+    modifier onlyOwner { if (msg.sender == owner) _; }
+
+    function changeOwner(address _newOwner) onlyOwner {
+        owner = _newOwner;
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        _dst.call.value(_value)(_data);
+    }
+}
+// to get the needed token functions in the contract
+contract Token {
+    function transfer(address, uint) returns(bool);
+    function balanceOf(address) constant returns (uint);
+}
+
+contract TokenSender is Owned {
+    Token public token; // the token we are working with
+    uint public totalToDistribute;
+
+    uint public next;
+
+
+    struct Transfer {
+        address addr;
+        uint amount;
+    }
+
+    Transfer[] public transfers;
+
+    function TokenSender(address _token) {
+        token = Token(_token);
+    }
+
+    // this is a used to save gas
+    uint constant D160 = 0x0010000000000000000000000000000000000000000;
+
+    // This is the function that makes the list of transfers and various
+    //  checks around that list, it is a little tricky, the data input is
+    //  structured with the `amount` and the (receiving) `addr` combined as one
+    //  long number and then this number is deconstructed in this function to
+    //  save gas and reduce the number of `0`'s that are needed to be stored
+    //   on the blockchain
+    function fill(uint[] data) onlyOwner {
+
+        // If the send has started then we just throw
+        if (next>0) throw;
+
+        uint acc;
+        uint offset = transfers.length;
+        transfers.length = transfers.length + data.length;
+        for (uint i = 0; i < data.length; i++ ) {
+            address addr = address( data[i] & (D160-1) );
+            uint amount = data[i] / D160;
+
+            transfers[offset + i].addr = addr;
+            transfers[offset + i].amount = amount;
+            acc += amount;
+        }
+        totalToDistribute += acc;
+    }
+    // This function actually makes the sends and tracks the amount of gas used
+    //  if it takes more gas than was sent with the transaction then this
+    //  function will need to be called a few times until
+    function run() onlyOwner {
+        if (transfers.length == 0) return;
+
+        // Keep next in the stack var mNext to save gas
+        uint mNext = next;
+
+        // Set the contract as finalized to avoid reentrance
+        next = transfers.length;
+
+        if ((mNext == 0 ) && ( token.balanceOf(this) != totalToDistribute)) throw;
+
+        while ((mNext<transfers.length) && ( gas() > 150000 )) {
+            uint amount = transfers[mNext].amount;
+            address addr = transfers[mNext].addr;
+            if (amount > 0) {
+                if (!token.transfer(addr, transfers[mNext].amount)) throw;
+            }
+            mNext ++;
+        }
+
+        // Set the next to the actual state.
+        next = mNext;
+    }
+
+
+    ///////////////////////
+    // Helper functions
+    ///////////////////////
+
+    function hasTerminated() constant returns (bool) {
+        if (transfers.length == 0) return false;
+        if (next < transfers.length) return false;
+        return true;
+    }
+
+    function nTransfers() constant returns (uint) {
+        return transfers.length;
+    }
+
+    function gas() internal constant returns (uint _gas) {
+        assembly {
+            _gas:= gas
+        }
+    }
+
+}
+```
+
+**Security Analysis:**
+Here’s a final, tightened‐up explanation:
+
+1) What these contracts do  
+   • Owned  
+     – Stores a single owner address.  
+     – onlyOwner modifier skips the function body if msg.sender ≠ owner (no revert).  
+     – Owner can changeOwner(), can make arbitrary low‐level calls via execute().  
+   • TokenSender (inherits Owned)  
+     – Holds one ERC-20 token address.  
+     – Owner calls fill() once to load a list of (recipient, amount) pairs.  
+     – Owner then calls run() one or more times; each run() will:  
+         • Advance a “next” index to remember progress,  
+         • Call token.transfer(recipient, amount) for each entry until gas runs out or list is done,  
+         • Stop on out-of-gas or a revert.
+
+2) Check for common exploits  
+   • Reentrancy  
+     – run() flips its progress index before the external transfer.  
+     – Even if a malicious token tried to reenter, every state‐changing function is protected by onlyOwner, and the reentrant call would come from the token contract (not owner) so the modifier simply skips the body.  
+     – There is no way for an attacker to steal or repeat entries.  
+   • Access control  
+     – All fill() and run() calls are onlyOwner; non-owner calls do nothing.  
+     – onlyOwner doesn’t revert, but it also doesn’t allow state changes by outsiders.  
+   • Arithmetic over/underflow  
+     – Only the owner ever sets up sums in fill(); an overflow there is an owner mistake, not an external exploit.  
+   • Unchecked low‐level calls  
+     – Owned.execute() ignores the boolean return from .call, so an owner could think an arbitrary call succeeded when it didn’t.  
+     – This is a “gotcha” for the owner but cannot be weaponized by an external attacker.  
+   • Denial‐of‐service  
+     – If any transfer() reverts or returns false, run() reverts the entire batch and freezes progress at that point.  
+     – Again, that’s a nuisance or owner error, not a way for a third party to steal funds.
+
+3) Conclusion and verdict  
+   – No entry point or state variable can be hijacked by anyone except the designated owner.  
+   – The only risks are operational (owner forgetting to send tokens, a bad token implementation, or the owner’s own unchecked execute() call).  
+   – There is no path for a third‐party attacker to drain funds, bypass onlyOwner, or DOS the contract in a way that steals value.  
+
+Final Verdict: SAFE  
+Exploitability: none by external parties
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.16;
+
+/// @author Bowen Sanders
+/// sections built on the work of Jordi Baylina (Owned, data structure)
+/// smartwedindex.sol contains a simple index of contract address, couple name, actual marriage date, bool displayValues to
+/// be used to create an array of all SmartWed contracts that are deployed 
+/// contract 0wned is licesned under GNU-3
+
+/// @dev `Owned` is a base level contract that assigns an `owner` that can be
+///  later changed
+contract Owned {
+
+    /// @dev `owner` is the only address that can call a function with this
+    /// modifier
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    address public owner;
+
+    /// @notice The Constructor assigns the message sender to be `owner`
+    function Owned() {
+        owner = msg.sender;
+    }
+
+    address public newOwner;
+
+    /// @notice `owner` can step down and assign some other address to this role
+    /// @param _newOwner The address of the new owner
+    ///  an unowned neutral vault, however that cannot be undone
+    function changeOwner(address _newOwner) onlyOwner {
+        newOwner = _newOwner;
+    }
+    /// @notice `newOwner` has to accept the ownership before it is transferred
+    ///  Any account or any contract with the ability to call `acceptOwnership`
+    ///  can be used to accept ownership of this contract, including a contract
+    ///  with no other functions
+    function acceptOwnership() {
+        if (msg.sender == newOwner) {
+            owner = newOwner;
+        }
+    }
+
+    // This is a general safty function that allows the owner to do a lot
+    //  of things in the unlikely event that something goes wrong
+    // _dst is the contract being called making this like a 1/1 multisig
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+         
+        _dst.call.value(_value)(_data);
+    }
+}
+
+// contract WedIndex 
+
+contract WedIndex is Owned {
+
+    // declare index data variables
+    string public wedaddress;
+    string public partnernames;
+    uint public indexdate;
+    uint public weddingdate;
+    uint public displaymultisig;
+
+    IndexArray[] public indexarray;
+
+    struct IndexArray {
+        uint indexdate;
+        string wedaddress;
+        string partnernames;
+        uint weddingdate;
+        uint displaymultisig;
+    }
+    
+    function numberOfIndex() constant public returns (uint) {
+        return indexarray.length;
+    }
+
+    // make functions to write and read index entries and nubmer of entries
+    function writeIndex(uint indexdate, string wedaddress, string partnernames, uint weddingdate, uint displaymultisig) {
+        indexarray.push(IndexArray(now, wedaddress, partnernames, weddingdate, displaymultisig));
+        IndexWritten(now, wedaddress, partnernames, weddingdate, displaymultisig);
+    }
+
+    // declare events
+    event IndexWritten (uint time, string contractaddress, string partners, uint weddingdate, uint display);
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (reentrancy)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

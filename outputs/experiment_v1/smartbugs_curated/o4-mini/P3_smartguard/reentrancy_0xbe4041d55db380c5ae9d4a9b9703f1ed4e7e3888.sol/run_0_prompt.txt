@@ -1,0 +1,845 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+contract COIN_BOX   
+{
+    struct Holder   
+    {
+        uint unlockTime;
+        uint balance;
+    }
+    
+    mapping (address => Holder) public Acc;
+    
+    uint public MinSum;
+    
+    Log LogFile;
+    
+    bool intitalized;
+    
+    function SetMinSum(uint _val)
+    public
+    {
+        if(intitalized)throw;
+        MinSum = _val;
+    }
+    
+    function SetLogFile(address _log)
+    public
+    {
+        if(intitalized)throw;
+        LogFile = Log(_log);
+    }
+    
+    function Initialized()
+    public
+    {
+        intitalized = true;
+    }
+    
+    function Put(uint _lockTime)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        acc.balance += msg.value;
+        if(now+_lockTime>acc.unlockTime)acc.unlockTime=now+_lockTime;
+        LogFile.AddMessage(msg.sender,msg.value,"Put");
+    }
+    
+    function Collect(uint _am)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        if( acc.balance>=MinSum && acc.balance>=_am && now>acc.unlockTime)
+        {
+            if(msg.sender.call.value(_am)())
+            {
+                acc.balance-=_am;
+                LogFile.AddMessage(msg.sender,_am,"Collect");
+            }
+        }
+    }
+    
+    function() 
+    public 
+    payable
+    {
+        Put(0);
+    }
+    
+}
+
+
+contract Log 
+{
+    struct Message
+    {
+        address Sender;
+        string  Data;
+        uint Val;
+        uint  Time;
+    }
+    
+    Message[] public History;
+    
+    Message LastMsg;
+    
+    function AddMessage(address _adr,uint _val,string _data)
+    public
+    {
+        LastMsg.Sender = _adr;
+        LastMsg.Time = now;
+        LastMsg.Val = _val;
+        LastMsg.Data = _data;
+        History.push(LastMsg);
+    }
+}
+```
+
+**Security Analysis:**
+Here is a concise, accurate and self‐contained refactoring of the analysis:
+
+1. Contract Overview  
+   • Users call Put() to deposit Ether. Their deposit is recorded in Acc[msg.sender].balance and Acc[msg.sender].unlockTime is set by the caller.  
+   • Users call Collect(_am) to withdraw up to their balance, provided:  
+     – _am ≥ global MinSum  
+     – _am ≤ their recorded balance  
+     – now ≥ their recorded unlockTime  
+   • Both Put() and Collect() emit a log entry by calling LogFile.AddMessage(...) in an external, untrusted contract.  
+   • There is no owner; anyone may call SetMinSum(), SetLogFile() or Initialized() until Initialized has been set to true once. After that they are immutable.
+
+2. Primary Vulnerabilities  
+   A. Reentrancy in Collect()  
+     – Collect() does something like  
+       if(msg.sender.call.value(_am)()) {  
+         acc.balance -= _am;  
+         LogFile.AddMessage(...);  
+       }  
+     – Because the external call (call.value) happens before the balance is decreased, a malicious fallback() can reenter Collect() and drain the account repeatedly.  
+   B. Unchecked Low‐Level Calls  
+     – Using call.value forwards all gas and only returns a boolean. Even though the code checks the boolean, it still enables reentrancy or other unexpected behavior.  
+   C. Access Control / Initialization Race  
+     – Before anyone flips Initialized to true, an attacker can set MinSum to an enormous value or point LogFile to a malicious contract. Once Initialized=true, these settings are frozen.  
+   D. Denial-of-Service via LogFile  
+     – If LogFile.AddMessage() reverts or consumes all gas, every Put or Collect call will fail, freezing user funds.  
+   E. Arithmetic Overflow (minor)  
+     – Using raw “acc.balance += msg.value” without SafeMath could overflow in extreme cases (e.g. repeated 2^256-1 Wei deposits), though unlikely in practice.
+
+3. Attack Scenario (Reentrancy)  
+   1. Attacker deploys a malicious contract with fallback() that calls Collect() again.  
+   2. Attacker deposits ≥ MinSum and sets unlockTime to a past timestamp.  
+   3. Attacker calls Collect(_am). The first call sends Ether out, triggering fallback() in the attacker contract.  
+   4. fallback() reenters Collect() before the balance is decreased, withdrawing again and again until the contract is drained or runs out of gas.
+
+4. Secondary Attacks  
+   • Before initialization, attacker sets MinSum extremely high → no one else can ever withdraw.  
+   • Before initialization, attacker points LogFile to a contract that always reverts → all Put/Collect operations revert.
+
+5. Conclusion  
+   – This contract is Vulnerable.  
+   – Primary category: Reentrancy (due to external call before state update).  
+   – Also suffers from unchecked low‐level calls, missing access control, DoS via external logger, and potential arithmetic overflow.  
+   – Remediation should include:  
+     • Use the checks‐effects‐interactions pattern (update balances before external calls).  
+     • Switch to transfer() or call with limited gas.  
+     • Add proper ownership on configuration functions.  
+     • Use SafeMath for arithmetic.  
+     • Avoid calling untrusted contracts in the critical path.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+contract COIN_BOX   
+{
+    struct Holder   
+    {
+        uint unlockTime;
+        uint balance;
+    }
+    
+    mapping (address => Holder) public Acc;
+    
+    uint public MinSum;
+    
+    Log LogFile;
+    
+    bool intitalized;
+    
+    function SetMinSum(uint _val)
+    public
+    {
+        if(intitalized)throw;
+        MinSum = _val;
+    }
+    
+    function SetLogFile(address _log)
+    public
+    {
+        if(intitalized)throw;
+        LogFile = Log(_log);
+    }
+    
+    function Initialized()
+    public
+    {
+        intitalized = true;
+    }
+    
+    function Put(uint _lockTime)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        acc.balance += msg.value;
+        if(now+_lockTime>acc.unlockTime)acc.unlockTime=now+_lockTime;
+        LogFile.AddMessage(msg.sender,msg.value,"Put");
+    }
+    
+    function Collect(uint _am)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        if( acc.balance>=MinSum && acc.balance>=_am && now>acc.unlockTime)
+        {
+            if(msg.sender.call.value(_am)())
+            {
+                acc.balance-=_am;
+                LogFile.AddMessage(msg.sender,_am,"Collect");
+            }
+        }
+    }
+    
+    function() 
+    public 
+    payable
+    {
+        Put(0);
+    }
+    
+}
+
+
+contract Log 
+{
+    struct Message
+    {
+        address Sender;
+        string  Data;
+        uint Val;
+        uint  Time;
+    }
+    
+    Message[] public History;
+    
+    Message LastMsg;
+    
+    function AddMessage(address _adr,uint _val,string _data)
+    public
+    {
+        LastMsg.Sender = _adr;
+        LastMsg.Time = now;
+        LastMsg.Val = _val;
+        LastMsg.Data = _data;
+        History.push(LastMsg);
+    }
+}
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, end-to-end explanation that (1) pinpoints the vulnerable code, (2) shows exactly how an attacker exploits it, (3) states the conditions that must be true for it to work, and (4) gives the simple fixes.
+
+1. Vulnerable Code Pattern  
+   In the Collect function you have:  
+     if (msg.sender.call.value(_am)()) {  
+       acc.balance -= _am;  
+       LogFile.AddMessage(msg.sender, _am, "Collect");  
+     }  
+   • It uses low-level `.call.value(...)()` to send Ether.  
+   • It updates the user’s balance only *after* the external call.  
+   • `.call` forwards *all* remaining gas to the recipient’s fallback, allowing re-entry.  
+
+2. Attack Vector (Reentrancy)  
+   A malicious contract does:  
+   a) Call `Put(...)` on the victim to deposit ≥ MinSum.  
+   b) Wait until `unlockTime` has passed.  
+   c) Call `Collect(amount)` on the victim.  
+   d) When the victim does `msg.sender.call.value(amount)()`, the attacker’s fallback runs with full gas and immediately calls `Collect(amount)` again—before the victim has subtracted `_am` from the attacker’s balance.  
+   e) Because state wasn’t updated yet, the victim contract thinks the attacker still has funds left, so it sends Ether again. Repeat until drained.
+
+3. Conditions for Exploitation  
+   • The attacker must have a balance ≥ MinSum.  
+   • `now > unlockTime` must hold (so the checks pass again in each re-entry).  
+   • No reentrancy guard or mutex in `Collect`.  
+   • Use of unprotected `.call.value()` that forwards all gas.
+
+4. Why This Breaks Checks-Effects-Interactions  
+   Correct pattern:  
+     1) Check user’s balance and time.  
+     2) **Effects**: subtract funds from storage.  
+     3) **Interaction**: send Ether.  
+   Here: 1 → 3 → 2, leaving storage in the old state during the external call so it can be re-entered.
+
+5. Remediation  
+   – Update state *before* sending Ether:  
+       acc.balance -= _am;  
+       msg.sender.transfer(_am);  
+   – Or wrap your `.call` in a reentrancy guard (e.g. OpenZeppelin’s `nonReentrant`).  
+   – Prefer `transfer()` (2300 gas stipend) or `send()` over raw `call` unless you really need the extra flexibility.
+
+By (a) reversing the “effects” and “interaction” steps and (b) using either the built-in gas-limited methods or a mutex, you close the door on this unchecked low-level call / reentrancy exploit.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+contract DEDI_GI
+{
+    address sender;
+    
+    address reciver;
+    
+    bool closed = false;
+    
+    uint unlockTime;
+ 
+    function Put_DEDI_gift(address _reciver)
+    public
+    payable
+    {
+        if( (!closed&&(msg.value > 1 ether)) || sender==0x00 )
+        {
+            sender = msg.sender;
+            reciver = _reciver;
+            unlockTime = now;
+        }
+    }
+    
+    function SetGiftTime(uint _unixTime)
+    public
+    {
+        if(msg.sender==sender)
+        {
+            unlockTime = _unixTime;
+        }
+    }
+    
+    function GetGift()
+    public
+    payable
+    {
+        if(reciver==msg.sender&&now>unlockTime)
+        {
+            msg.sender.transfer(this.balance);
+        }
+    }
+    
+    function CloseGift()
+    public
+    {
+        if(sender == msg.sender && reciver != 0x0 )
+        {
+           closed=true;
+        }
+    }
+    
+    function() public payable{}
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, end-to-end summary of the issue, why it’s exploitable, and how to fix it:
+
+1. Vulnerable pattern in the code  
+   • In your `GetGift()` function you do  
+     `msg.sender.transfer(this.balance);`  
+   • `transfer()` always forwards exactly 2,300 gas to the recipient’s fallback.  
+   • If the fallback uses more gas or explicitly reverts, `transfer()` itself bubbles up that revert, and because you don’t catch it or fall back to another path, the whole `GetGift()` call reverts.
+
+2. Exploit steps (on-chain Denial of Service)  
+   a. Attacker deploys a malicious contract whose fallback always reverts:  
+      ```  
+      fallback() external payable { revert(); }  
+      ```  
+   b. Attacker calls `Put_DEDI_gift(attackerContract)` with ≥1 ETH.  
+      – `sender = attackerEOA` and `reciver = attackerContract`  
+      – `unlockTime` is set (by default to now or via a later `SetGiftTime`)  
+   c. When anyone (including the attacker) calls `GetGift()` after `unlockTime`, the contract does:  
+      ```  
+      reciver.transfer(this.balance);  
+      ```  
+   d. The malicious contract’s fallback immediately reverts.  
+      – `transfer()` reverts  
+      – `GetGift()` reverts  
+   e. The funds stay locked forever, because every call to `GetGift()` will hit the same revert.
+
+3. Why this is a permanent DoS on the funds  
+   • You never catch or handle the revert from `transfer()`.  
+   • You don’t reset or clear `reciver` if a transfer fails.  
+   • No alternative withdrawal path exists—every attempt to pull funds reverts.  
+
+4. Conditions that enable this attack  
+   • Using `transfer()` (fixed 2,300 gas stipend) without a fallback or retry logic.  
+   • Trusting that the recipient’s fallback will always succeed.  
+   • Not offering a “pull-payment” pattern where recipients claim funds themselves.  
+
+5. How to fix it  
+   • Switch to the withdrawal (pull) pattern:  
+     – Maintain a mapping of pending withdrawals per address.  
+     – Let recipients call a `withdraw()` function that does a low-level `call{value:…}("")` and handles failures (e.g. by leaving their balance unchanged on revert).  
+   • Or, if you must push funds, use `call{value: …}("")` and check its return value rather than relying on `transfer()`. Wrap it in a require or safe-math fallback so you can recover or reset state on failure.  
+   • Always follow Checks-Effects-Interactions: update state (e.g. zero out balances) before making any external call.
+
+In summary, the root cause is trusting a single `transfer()` to succeed. A malicious fallback can force that call to revert and lock your contract’s Ether forever. Moving to a pull-based model or handling failures explicitly eliminates the DoS risk.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 4: ACCESS_CONTROL VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+
+contract TransferReg
+{
+    address public Owner = msg.sender;
+    address public DataBase;
+    uint256 public Limit;
+    
+    function Set(address dataBase, uint256 limit)
+    {
+        require(msg.sender == Owner);
+        Limit = limit;
+        DataBase = dataBase;
+    }
+    
+    function()payable{}
+    
+    function transfer(address adr)
+    payable
+    {
+        if(msg.value>Limit)
+        {        
+            if(DataBase.delegatecall(bytes4(sha3("AddToDB(address)")),msg.sender))
+            adr.transfer(this.balance);
+        }
+    }
+    
+}
+
+contract Lib
+{
+    address owner = msg.sender;
+    
+    bytes lastUknownMessage;
+    
+    mapping (address => uint256) Db;
+
+    function() public payable 
+    {
+        lastUknownMessage = msg.data;
+    }
+    
+    function AddToDB(address adr)
+    public
+    payable
+    {
+        Db[adr]++;
+    }
+    
+    function GetAddrCallQty(address adr)
+    public 
+    returns(uint)
+    {
+        require(owner==msg.sender);
+        return Db[adr];
+    }
+    
+    function GetLastMsg()
+    public 
+    returns(bytes)
+    {
+        require(owner==msg.sender);
+        return lastUknownMessage;
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+Here’s a tightened, end-to-end explanation of the flaw:
+
+1) What the code is supposed to do  
+   • TransferReg stores an owner, a library (DataBase) address and a numeric Limit.  
+   • The owner alone can call Set(...) to update the library address or change Limit.  
+   • A payable fallback exists (to accept ETH) but does nothing else.  
+   • transfer(address adr) is public, payable and does two things in sequence:  
+     1. If msg.value > Limit, it delegatecalls into the library’s AddToDB(msg.sender) function.  
+     2. If that delegatecall returns success, it uses adr.transfer(this.balance) to send _all_ ETH held by TransferReg to the supplied adr.  
+
+2) Where the danger lies  
+   • transfer(...) is publicly callable by _anyone_, with _any_ adr.  
+   • As soon as you send slightly more than Limit, you trigger the delegatecall (which always succeeds in normal operation), then you pull out the entire contract balance to the address you specify.  
+   • You only need to deposit a small amount (just over Limit) to drain every last wei—far more than you put in.  
+
+3) Why this isn’t caught by other checks  
+   • There is no reentrancy risk (it uses transfer(), limited to 2,300 gas).  
+   • The delegatecall to the library is “protected” by owner-only Set(...), but that only governs which library is used and what Limit is; it does _not_ gate who can call transfer() or which destination address they can pick.  
+   • There are no arithmetic overflows or other subtle bugs—you simply have an unrestricted withdrawal function.  
+
+4) Impact & classification  
+   • Impact: an attacker can fully drain the contract’s balance at will.  
+   • Category: access_control (unrestricted withdrawal logic).  
+   • Confidence: 90%
+
+Bottom line: transfer(...) should never forward the entire balance to an arbitrary address based solely on msg.value exceeding a limit. At minimum it needs an owner check or a whitelist on recipient addresses, or better yet redesign the withdrawal logic entirely.
+
+
+**Classification**: This code contains a **access_control** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+
+contract TransferReg
+{
+    address public Owner = msg.sender;
+    address public DataBase;
+    uint256 public Limit;
+    
+    function Set(address dataBase, uint256 limit)
+    {
+        require(msg.sender == Owner);
+        Limit = limit;
+        DataBase = dataBase;
+    }
+    
+    function()payable{}
+    
+    function transfer(address adr)
+    payable
+    {
+        if(msg.value>Limit)
+        {        
+            if(DataBase.delegatecall(bytes4(sha3("AddToDB(address)")),msg.sender))
+            adr.transfer(this.balance);
+        }
+    }
+    
+}
+
+contract Lib
+{
+    address owner = msg.sender;
+    
+    bytes lastUknownMessage;
+    
+    mapping (address => uint256) Db;
+
+    function() public payable 
+    {
+        lastUknownMessage = msg.data;
+    }
+    
+    function AddToDB(address adr)
+    public
+    payable
+    {
+        Db[adr]++;
+    }
+    
+    function GetAddrCallQty(address adr)
+    public 
+    returns(uint)
+    {
+        require(owner==msg.sender);
+        return Db[adr];
+    }
+    
+    function GetLastMsg()
+    public 
+    returns(bytes)
+    {
+        require(owner==msg.sender);
+        return lastUknownMessage;
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, step-by-step summary of the issue, why the attack works, and under what conditions it can be carried out:
+
+1. Vulnerable Code Pattern  
+   • In `TransferReg.transfer` we have:  
+     ```
+     function transfer(address adr) payable {
+       if (msg.value > Limit) {
+         // ① untrusted delegatecall
+         if (DataBase.delegatecall(
+               bytes4(sha3("AddToDB(address)")),
+               msg.sender
+             ))
+           // ② only on “true” do we forward the ether
+           adr.transfer(this.balance);
+       }
+     }
+     ```  
+   • Two critical mistakes:  
+     a) We delegatecall into a library whose address (`DataBase`) can be reset arbitrarily and is not fully trusted.  
+     b) We *silently skip* the payout if the delegatecall returns false (or throws). We never `require(success)`.
+
+2. Attack Vector  
+   • An attacker (or malicious owner) repoints `DataBase` at a contract that makes `AddToDB(address)` always revert or always return `false`.  
+   • Every subsequent `delegatecall` now fails → the `if (…)` guard is never satisfied → `adr.transfer(...)` is never executed.  
+   • Victims keep sending `msg.value > Limit`, but every call traps their ether in the contract.
+
+3. Why This Is a Total DoS  
+   • All future deposits are stuck—there is no alternate withdrawal path.  
+   • Because failures aren’t bubbled up with a revert, users see only a “silent” no-op.  
+   • Once a malicious library address is set (by the owner or attacker), there is no on-chain way to restore the proper library, so the contract is effectively bricked.
+
+4. Conditions Enabling the Exploit  
+   • Use of `delegatecall` on an externally configurable library address that you don’t fully trust.  
+   • Guarding the *only* payout path behind a boolean return from that `delegatecall`, but *never* reverting if it fails.  
+   • Absence of any fallback or alternative withdrawal logic.
+
+5. How to Prevent  
+   • Immediately `require` the success of any untrusted delegatecall (or external call) rather than silently ignoring a failure.  
+   • Keep critical logic in a contract you fully control, or use immutable library addresses.  
+   • Always consider “what if this library call fails?” and ensure you don’t lock funds in a silent-­fail path.
+
+By replacing  
+```
+if (untrustedDelegateCall(...))
+  payout;
+```
+with  
+```
+require(untrustedDelegateCall(...));
+payout;
+```
+or by otherwise ensuring a failed delegatecall reverts the entire transaction, you eliminate the ability for an attacker to freeze the contract.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.19;
+
+contract MONEY_BOX   
+{
+    struct Holder   
+    {
+        uint unlockTime;
+        uint balance;
+    }
+    
+    mapping (address => Holder) public Acc;
+    
+    uint public MinSum;
+    
+    Log LogFile;
+    
+    bool intitalized;
+    
+    function SetMinSum(uint _val)
+    public
+    {
+        if(intitalized)throw;
+        MinSum = _val;
+    }
+    
+    function SetLogFile(address _log)
+    public
+    {
+        if(intitalized)throw;
+        LogFile = Log(_log);
+    }
+    
+    function Initialized()
+    public
+    {
+        intitalized = true;
+    }
+    
+    function Put(uint _lockTime)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        acc.balance += msg.value;
+        if(now+_lockTime>acc.unlockTime)acc.unlockTime=now+_lockTime;
+        LogFile.AddMessage(msg.sender,msg.value,"Put");
+    }
+    
+    function Collect(uint _am)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        if( acc.balance>=MinSum && acc.balance>=_am && now>acc.unlockTime)
+        {
+            
+            if(msg.sender.call.value(_am)())
+            {
+                acc.balance-=_am;
+                LogFile.AddMessage(msg.sender,_am,"Collect");
+            }
+        }
+    }
+    
+    function() 
+    public 
+    payable
+    {
+        Put(0);
+    }
+    
+}
+
+contract Log 
+{
+    struct Message
+    {
+        address Sender;
+        string  Data;
+        uint Val;
+        uint  Time;
+    }
+    
+    Message[] public History;
+    
+    Message LastMsg;
+    
+    function AddMessage(address _adr,uint _val,string _data)
+    public
+    {
+        LastMsg.Sender = _adr;
+        LastMsg.Time = now;
+        LastMsg.Val = _val;
+        LastMsg.Data = _data;
+        History.push(LastMsg);
+    }
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (reentrancy)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (denial_of_service)?
+- Does it have patterns similar to Example 4 (access_control)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

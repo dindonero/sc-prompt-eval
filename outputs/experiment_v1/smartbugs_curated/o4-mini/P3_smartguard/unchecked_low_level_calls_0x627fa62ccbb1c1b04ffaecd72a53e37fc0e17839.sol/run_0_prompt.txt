@@ -1,0 +1,980 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+contract Ownable
+{
+    address newOwner;
+    address owner = msg.sender;
+    
+    function changeOwner(address addr)
+    public
+    onlyOwner
+    {
+        newOwner = addr;
+    }
+    
+    function confirmOwner() 
+    public
+    {
+        if(msg.sender==newOwner)
+        {
+            owner=newOwner;
+        }
+    }
+    
+    modifier onlyOwner
+    {
+        if(owner == msg.sender)_;
+    }
+}
+
+contract Token is Ownable
+{
+    address owner = msg.sender;
+    function WithdrawToken(address token, uint256 amount,address to)
+    public 
+    onlyOwner
+    {
+        token.call(bytes4(sha3("transfer(address,uint256)")),to,amount); 
+    }
+}
+
+contract TokenBank is Token
+{
+    uint public MinDeposit;
+    mapping (address => uint) public Holders;
+    
+     ///Constructor
+    function initTokenBank()
+    public
+    {
+        owner = msg.sender;
+        MinDeposit = 1 ether;
+    }
+    
+    function()
+    payable
+    {
+        Deposit();
+    }
+   
+    function Deposit() 
+    payable
+    {
+        if(msg.value>=MinDeposit)
+        {
+            Holders[msg.sender]+=msg.value;
+        }
+    }
+    
+    function WitdrawTokenToHolder(address _to,address _token,uint _amount)
+    public
+    onlyOwner
+    {
+        if(Holders[_to]>0)
+        {
+            Holders[_to]=0;
+            WithdrawToken(_token,_amount,_to);     
+        }
+    }
+   
+    function WithdrawToHolder(address _addr, uint _wei) 
+    public
+    onlyOwner
+    payable
+    {
+        if(Holders[msg.sender]>0)
+        {
+            if(Holders[_addr]>=_wei)
+            {
+                _addr.call.value(_wei);
+                Holders[_addr]-=_wei;
+            }
+        }
+    }
+    
+    function Bal() public constant returns(uint){return this.balance;}
+}
+```
+
+**Security Analysis:**
+Here is a concise, end-to-end description of what is wrong, how you can exploit it, and under what conditions.
+
+1. Ownership‐shadowing / access-control bug  
+   • The base Ownable contract declares `address public owner` and a two-step transfer process.  
+   • Both Token and TokenBank redeclare their own `owner` variables, which “shadow” the parent’s.  
+   • The `onlyOwner` modifier in Ownable always checks the **parent** `owner`, which is never changed by TokenBank’s `initTokenBank()`.  
+   → Effect: after deployment, TokenBank’s intended manager (set in initTokenBank) can never call any `onlyOwner` function. Only the **original** deployer of the contract (the parent owner) still has withdrawal rights. This is a denial-of-service or outright lockout for the real bank operator.
+
+2. Unchecked low-level calls  
+   • Both token withdrawals (ERC-20) and ETH withdrawals use `.call(...)` rather than a safe ABI call.  
+   • No `require(token.call(...))` or `require(_addr.call.value(...))`: a failing ERC-20 transfer or a reversion in the fallback will be ignored, yet the holder’s balance mapping is immediately zeroed or reduced.  
+   → Effect: if the token contract reverts or returns `false` (some compliant tokens do this on failure), users lose their recorded balance anyway.  
+
+3. Reentrancy in ETH withdrawal  
+   Function:  
+     function WithdrawToHolder(address _addr, uint256 _wei) onlyOwner {  
+       require(Holders[_addr] >= _wei);  
+       _addr.call.value(_wei)();           // ① external call  
+       Holders[_addr] -= _wei;            // ② state update  
+     }  
+   • Because the ETH is sent **before** the mapping is updated, a malicious `_addr` can reenter via its fallback, hijack control, and call back into the bank’s payable fallback (or `Deposit()`), increasing its `Holders[_addr]` balance.  
+   • When the original call returns to line ②, it only subtracts the _first_ withdrawal amount, leaving the reentered deposit in the holder’s balance.  
+   → Effect: colluding with or controlling the `onlyOwner` (in practice the **deployer** due to the shadow-owner bug), an attacker can repeatedly reenter, trick the balance counter, and drain all of the bank’s ETH.
+
+Overall verdict  
+  – VULNERABLE  
+  – Root causes:  
+     • unchecked_low_level_calls (ERC-20 & ETH `.call`)  
+     • reentrancy (ETH withdrawal before state update)  
+     • access_control / variable_shadowing (shadowed `owner` breaks `onlyOwner`)  
+  – Exploitation requires either:  
+     1) ERC-20 tokens that return `false` on `transfer` to silently steal user tokens, or  
+     2) Collusion with the contract’s effective `onlyOwner` (the deployer) to reentrantly drain ETH.  
+  – CONFIDENCE: 85%
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+contract Ownable
+{
+    address newOwner;
+    address owner = msg.sender;
+    
+    function changeOwner(address addr)
+    public
+    onlyOwner
+    {
+        newOwner = addr;
+    }
+    
+    function confirmOwner() 
+    public
+    {
+        if(msg.sender==newOwner)
+        {
+            owner=newOwner;
+        }
+    }
+    
+    modifier onlyOwner
+    {
+        if(owner == msg.sender)_;
+    }
+}
+
+contract Token is Ownable
+{
+    address owner = msg.sender;
+    function WithdrawToken(address token, uint256 amount,address to)
+    public 
+    onlyOwner
+    {
+        token.call(bytes4(sha3("transfer(address,uint256)")),to,amount); 
+    }
+}
+
+contract TokenBank is Token
+{
+    uint public MinDeposit;
+    mapping (address => uint) public Holders;
+    
+     ///Constructor
+    function initTokenBank()
+    public
+    {
+        owner = msg.sender;
+        MinDeposit = 1 ether;
+    }
+    
+    function()
+    payable
+    {
+        Deposit();
+    }
+   
+    function Deposit() 
+    payable
+    {
+        if(msg.value>=MinDeposit)
+        {
+            Holders[msg.sender]+=msg.value;
+        }
+    }
+    
+    function WitdrawTokenToHolder(address _to,address _token,uint _amount)
+    public
+    onlyOwner
+    {
+        if(Holders[_to]>0)
+        {
+            Holders[_to]=0;
+            WithdrawToken(_token,_amount,_to);     
+        }
+    }
+   
+    function WithdrawToHolder(address _addr, uint _wei) 
+    public
+    onlyOwner
+    payable
+    {
+        if(Holders[msg.sender]>0)
+        {
+            if(Holders[_addr]>=_wei)
+            {
+                _addr.call.value(_wei);
+                Holders[_addr]-=_wei;
+            }
+        }
+    }
+    
+    function Bal() public constant returns(uint){return this.balance;}
+}
+```
+
+**Security Analysis:**
+Final Refined Explanation
+
+Summary of Vulnerabilities and Attack Flow
+
+1. Ownership and Access Control Errors  
+   - onlyOwner modifier does not revert on failure  
+     • Implemented as “if (owner == msg.sender) _;”  
+     • If caller is not owner, execution simply skips the function body without reverting  
+     • Misleading “success” gas refund and no actual protection  
+   - owner variable is shadowed in the child contract  
+     • Child redeclares “address public owner;” hiding the parent’s Ownable.owner  
+     • onlyOwner and any code referring to owner points to the child’s uninitialized slot, not the true deployer  
+   - initTokenBank() is public and unprotected  
+     • Resets the child’s owner field, MinDeposit, and other critical parameters to attacker-controlled values  
+     • After one public call, the attacker becomes “owner” for all onlyOwner checks  
+
+2. Unprotected Initialization (access_control)  
+   - Anyone can call initTokenBank() before it’s locked down  
+   - Attacker sets themselves as owner and controls administrative methods, e.g. withdrawTokenToHolder, withdrawToHolder  
+
+3. Unchecked Low-Level Calls  
+   - In withdrawTokenToHolder(address tokenAddr, address holder):  
+     • Clears holders[holder] balance before calling token.transfer(holder, amount)  
+     • Does not check the ERC-20 call’s return value  
+     • If transfer fails or token is malicious, user’s balance is irreversibly lost  
+   - In withdrawToHolder(address payable holder):  
+     • Executes holder.call{value: amount}("") before subtracting from holders[holder]  
+     • Ignores the boolean success flag  
+     • On failure, the balance is still reduced, locking ETH in the contract  
+
+4. Reentrancy Sequencing  
+   - withdrawToHolder is gated by onlyOwner, but once attacker is owner they can reenter  
+   - Funds are sent (call.value) before updating the holders mapping  
+   - Malicious fallback function reenters withdrawToHolder repeatedly  
+   - Drains more ETH than recorded balance  
+
+5. Arithmetic Overflows (pre-0.8.0)  
+   - deposit() uses “holders[msg.sender] += msg.value” without bounds checks  
+   - If MinDeposit is reset to zero, attacker can spam micro-deposits or overflow their balance  
+
+Attack Vector in Brief  
+1. Attacker calls initTokenBank() → becomes owner  
+2. Attacker calls withdrawToHolder or withdrawTokenToHolder targeting their own address  
+3. Unchecked low-level call and poor sequencing enable reentrancy or silent failure  
+4. Attacker drains ETH and tokens; legitimate users end up with zero balances  
+
+Conditions for Exploitation  
+- initTokenBank() left public and unprotected  
+- onlyOwner modifier implemented incorrectly (no revert)  
+- owner variable shadowing in child contract  
+- Withdraw functions call external transfers before state updates  
+- No return-value checks on external token transfers  
+- Arithmetic without overflow guards  
+
+Final Verdict  
+VULNERABLE  
+Categories:  
+• access_control (unprotected initialization + ownership shadowing)  
+• unchecked_low_level_calls  
+• reentrancy  
+• integer_overflow (pre-0.8 arithmetic)
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+
+contract TransferReg
+{
+    address public Owner = msg.sender;
+    address public DataBase;
+    uint256 public Limit;
+    
+    function Set(address dataBase, uint256 limit)
+    {
+        require(msg.sender == Owner);
+        Limit = limit;
+        DataBase = dataBase;
+    }
+    
+    function()payable{}
+    
+    function transfer(address adr)
+    payable
+    {
+        if(msg.value>Limit)
+        {        
+            if(DataBase.delegatecall(bytes4(sha3("AddToDB(address)")),msg.sender))
+            adr.transfer(this.balance);
+        }
+    }
+    
+}
+
+contract Lib
+{
+    address owner = msg.sender;
+    
+    bytes lastUknownMessage;
+    
+    mapping (address => uint256) Db;
+
+    function() public payable 
+    {
+        lastUknownMessage = msg.data;
+    }
+    
+    function AddToDB(address adr)
+    public
+    payable
+    {
+        Db[adr]++;
+    }
+    
+    function GetAddrCallQty(address adr)
+    public 
+    returns(uint)
+    {
+        require(owner==msg.sender);
+        return Db[adr];
+    }
+    
+    function GetLastMsg()
+    public 
+    returns(bytes)
+    {
+        require(owner==msg.sender);
+        return lastUknownMessage;
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, step-by-step of what’s happening, why it’s dangerous, and how to fix it:
+
+1. Vulnerable Pattern  
+   • In your `transfer()` you do something like:
+       if (DataBase.delegatecall(...)) {
+         adr.transfer(this.balance);
+       }  
+     Because it’s an `if` and not a `require`, a failed `delegatecall` simply skips the transfer instead of reverting the whole transaction.
+
+2. Why This Becomes a Denial-of-Service  
+   • An attacker (or mistake by the owner) points your `DataBase` address to a contract whose `delegatecall` always fails (e.g. has no matching function or its fallback reverts).  
+   • Now every time anyone calls `transfer()` with `msg.value > Limit`:
+     1. The ETH is accepted by your contract (no revert).  
+     2. The `delegatecall` fails and returns `false`.  
+     3. You skip the `adr.transfer(...)` and return normally.  
+   • Result: each caller’s ETH is stuck in your contract forever—there is no other withdrawal path.  Over time the attacker “poisons” the DB library and the contract fills up with unrecoverable funds.
+
+3. Conditions for Exploitation  
+   • You must allow arbitrary updating of the `DataBase` address (so an attacker can repoint it).  
+   • You must swallow delegatecall failures instead of reverting.  
+   • There must be no other function that lets users recover their locked funds.
+
+4. How to Fix It  
+   Always treat an external or delegate call failure as fatal, unless you have an explicit fallback path. In practice, change your code to:  
+     require(
+       DataBase.delegatecall(...),
+       "DB update failed"
+     );  
+   This way a bad or malicious library immediately reverts and the user’s ETH is never locked in your contract.
+
+By enforcing a revert on delegatecall failure, you close the DoS hole and prevent any accidental or hostile library from freezing user deposits.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 4: ACCESS_CONTROL VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+
+contract TransferReg
+{
+    address public Owner = msg.sender;
+    address public DataBase;
+    uint256 public Limit;
+    
+    function Set(address dataBase, uint256 limit)
+    {
+        require(msg.sender == Owner);
+        Limit = limit;
+        DataBase = dataBase;
+    }
+    
+    function()payable{}
+    
+    function transfer(address adr)
+    payable
+    {
+        if(msg.value>Limit)
+        {        
+            if(DataBase.delegatecall(bytes4(sha3("AddToDB(address)")),msg.sender))
+            adr.transfer(this.balance);
+        }
+    }
+    
+}
+
+contract Lib
+{
+    address owner = msg.sender;
+    
+    bytes lastUknownMessage;
+    
+    mapping (address => uint256) Db;
+
+    function() public payable 
+    {
+        lastUknownMessage = msg.data;
+    }
+    
+    function AddToDB(address adr)
+    public
+    payable
+    {
+        Db[adr]++;
+    }
+    
+    function GetAddrCallQty(address adr)
+    public 
+    returns(uint)
+    {
+        require(owner==msg.sender);
+        return Db[adr];
+    }
+    
+    function GetLastMsg()
+    public 
+    returns(bytes)
+    {
+        require(owner==msg.sender);
+        return lastUknownMessage;
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+This code contains a access_control vulnerability.
+
+Yes – your write-up correctly spots the insecure bits, steps through exactly how an attacker would trigger them, and lays out every prerequisite for pulling off the drain. Below is a cleaned-up, end-to-end explanation:
+
+1. Vulnerable Function  
+   • There is a single public, payable function called transfer(address adr).  
+   • No `onlyOwner` (or similar) guard is applied to it.  
+
+2. Insecure Gatekeeper  
+   • The only check is `if (msg.value > Limit)`.  
+   • Storage variable `Limit` is initialized to 0 and only the contract owner can raise it.  
+   • If the owner never calls the setter, `Limit` remains 0 forever.  
+
+3. Unchecked Delegatecall  
+   • Inside the `if`, the code does a `delegatecall` into the DataBase library.  
+   • In practice that `delegatecall` almost always succeeds (returning `true`).  
+   • Immediately after a successful delegatecall, the code executes `adr.transfer(this.balance)`.  
+
+4. Attack Scenario on a Fresh Deployment  
+   a. Attacker calls `transfer(theirAddress)` and attaches any non-zero value (e.g. 1 wei).  
+   b. Since `Limit == 0`, the condition `msg.value > Limit` passes.  
+   c. `delegatecall` to DataBase returns `true`.  
+   d. The contract sends its *entire* balance (including the attacker’s 1 wei) to `theirAddress`.  
+
+5. Root Cause  
+   • **Missing access control.** Any caller can invoke the withdrawal logic.  
+   • **Default-zero limit.** Relying on an uninitialized or never-set cap means “zero” can be trivially beaten by any deposit.  
+   • **Blind trust in delegatecall.** Libraries do not inherit your ownership checks—you must explicitly re-enforce them.  
+
+Key Lessons  
+   • Always protect **every** ETH-moving function with a strict authorization check (e.g. `onlyOwner`, `require(msg.sender == recipient)`, etc.).  
+   • Never rely on a “default” numeric threshold for security—initialize it to a safe non-zero value or enforce it with an owner-only setter call at deployment.  
+   • Remember that `delegatecall` executes in your contract’s context and does not carry over any pre-existing access restrictions.
+
+
+**Classification**: This code contains a **access_control** vulnerability.
+
+---
+
+### EXAMPLE 5: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+contract Base 
+{
+    address newOwner;
+    address owner = msg.sender;
+    address creator = msg.sender;
+    
+    function isOwner()
+    internal
+    constant
+    returns(bool) 
+    {
+        return owner == msg.sender;
+    }
+    
+    function changeOwner(address addr)
+    public
+    {
+        if(isOwner())
+        {
+            newOwner = addr;
+        }
+    }
+    
+    function confirmOwner()
+    public
+    {
+        if(msg.sender==newOwner)
+        {
+            owner=newOwner;
+        }
+    }
+    
+    function canDrive()
+    internal
+    constant
+    returns(bool)
+    {
+        return (owner == msg.sender)||(creator==msg.sender);
+    }
+    
+    function WthdrawAllToCreator()
+    public
+    payable
+    {
+        if(msg.sender==creator)
+        {
+            creator.transfer(this.balance);
+        }
+    }
+    
+    function WthdrawToCreator(uint val)
+    public
+    payable
+    {
+        if(msg.sender==creator)
+        {
+            creator.transfer(val);
+        }
+    }
+    
+    function WthdrawTo(address addr,uint val)
+    public
+    payable
+    {
+        if(msg.sender==creator)
+        {
+            addr.transfer(val);
+        }
+    }
+    
+    function WithdrawToken(address token, uint256 amount)
+    public 
+    {
+        if(msg.sender==creator)
+        {
+            token.call(bytes4(sha3("transfer(address,uint256)")),creator,amount); 
+        }
+    }
+}
+
+contract DepositBank is Base
+{
+    uint public SponsorsQty;
+    
+    uint public CharterCapital;
+    
+    uint public ClientQty;
+    
+    uint public PrcntRate = 1;
+    
+    uint public MinPayment;
+    
+    bool paymentsAllowed;
+    
+    struct Lender 
+    {
+        uint LastLendTime;
+        uint Amount;
+        uint Reserved;
+    }
+    
+    mapping (address => uint) public Sponsors;
+    
+    mapping (address => Lender) public Lenders;
+    
+    event StartOfPayments(address indexed calledFrom, uint time);
+    
+    event EndOfPayments(address indexed calledFrom, uint time);
+    
+    function()
+    payable
+    {
+        ToSponsor();
+    }
+    
+    
+    ///Constructor
+    function init()
+    Public
+    {
+        owner = msg.sender;
+        PrcntRate = 5;
+        MinPayment = 1 ether;
+    }
+    
+    
+    // investors================================================================
+    
+    function Deposit() 
+    payable
+    {
+        FixProfit();//fix time inside
+        Lenders[msg.sender].Amount += msg.value;
+    }
+    
+    function CheckProfit(address addr) 
+    constant 
+    returns(uint)
+    {
+        return ((Lenders[addr].Amount/100)*PrcntRate)*((now-Lenders[addr].LastLendTime)/1 days);
+    }
+    
+    function FixProfit()
+    {
+        if(Lenders[msg.sender].Amount>0)
+        {
+            Lenders[msg.sender].Reserved += CheckProfit(msg.sender);
+        }
+        Lenders[msg.sender].LastLendTime=now;
+    }
+    
+    function WitdrawLenderProfit()
+    payable
+    {
+        if(paymentsAllowed)
+        {
+            FixProfit();
+            uint profit = Lenders[msg.sender].Reserved;
+            Lenders[msg.sender].Reserved = 0;
+            msg.sender.transfer(profit);        
+        }
+    }
+    
+    //==========================================================================
+    
+    // sponsors ================================================================
+    
+    function ToSponsor() 
+    payable
+    {
+        if(msg.value>= MinPayment)
+        {
+            if(Sponsors[msg.sender]==0)SponsorsQty++;
+            Sponsors[msg.sender]+=msg.value;
+            CharterCapital+=msg.value;
+        }   
+    }
+    
+    //==========================================================================
+    
+    
+    function AuthorizePayments(bool val)
+    {
+        if(isOwner())
+        {
+            paymentsAllowed = val;
+        }
+    }
+    function StartPaymens()
+    {
+        if(isOwner())
+        {
+            AuthorizePayments(true);
+            StartOfPayments(msg.sender, now);
+        }
+    }
+    function StopPaymens()
+    {
+        if(isOwner())
+   
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Final Refined Explanation
+
+Overall design  
+• Two roles: “sponsors” fund the pool, “lenders” deposit ETH and accrue daily interest.  
+• Owner (intended to be set once) can flip paymentsAllowed to let lenders withdraw.  
+• Creator (set at deployment) has special withdrawal functions.
+
+Key Findings
+
+1. Broken Constructor / Ownership Hijack  
+   – The function meant to be the constructor is declared as “init() Public { … }” instead of “constructor” or “init() public”. Solidity is case‐sensitive, so init is just a normal public function.  
+   – Nobody sets owner or prcntRate at deploy time; defaults remain owner=0x0, prcntRate=1, MinPayment=0.  
+   – Any attacker can call init() first, become both creator and owner, and set themselves up to drain the contract.
+
+2. Creator Backdoor  
+   – WithdrawAllToCreator, WithdrawToCreator and WithdrawTo use the immutable creator variable, bypassing the owner logic entirely.  
+   – Even after a “legitimate” owner is set, the creator role retains full drain privileges at any time.
+
+3. Arithmetic Risks  
+   – No SafeMath. Profit = balance * prcntRate * daysElapsed / (100*365). Large balances or long waits can overflow intermediate results or produce incorrect rounding.
+
+4. Time-Manipulation  
+   – Profit is calculated from block.timestamp. A miner can skew timestamps within allowed drift to increase or decrease a lender’s reported profit.
+
+5. Unchecked Low-Level Call for ERC-20  
+   – withdrawToken uses token.call(bytes4(sha3("transfer(address,uint256)")), …) without checking the returned success boolean. Non-standard tokens can break or revert silently.
+
+6. Denial-of-Service via paymentsAllowed  
+   – If the owner (or malicious creator masquerading as owner) never enables paymentsAllowed, lenders can never withdraw their accrued interest.
+
+Conditions for Exploitation  
+• Any external account can call init() immediately after deployment, hijack both owner and creator roles, and then:  
+   – Drain all ETH via withdrawAllToCreator.  
+   – Withdraw ERC-20 tokens via withdrawToken (no return check).  
+   – Toggle paymentsAllowed at will to lock out lenders.
+
+Verdict  
+VULNERABLE
+
+Categories  
+• access_control (broken constructor & creator backdoor)  
+• arithmetic (no overflow checks)  
+• unchecked_low_level_calls (raw .call for ERC-20)  
+• time_manipulation (timestamp-based profit)  
+• denial_of_service (paymentsAllowed gate)
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.19;
+
+contract Ownable
+{
+    address newOwner;
+    address owner = msg.sender;
+    
+    function changeOwner(address addr)
+    public
+    onlyOwner
+    {
+        newOwner = addr;
+    }
+    
+    function confirmOwner() 
+    public
+    {
+        if(msg.sender==newOwner)
+        {
+            owner=newOwner;
+        }
+    }
+    
+    modifier onlyOwner
+    {
+        if(owner == msg.sender)_;
+    }
+}
+
+contract Token is Ownable
+{
+    address owner = msg.sender;
+    function WithdrawToken(address token, uint256 amount,address to)
+    public 
+    onlyOwner
+    {
+         
+        token.call(bytes4(sha3("transfer(address,uint256)")),to,amount); 
+    }
+}
+
+contract TokenBank is Token
+{
+    uint public MinDeposit;
+    mapping (address => uint) public Holders;
+    
+     ///Constructor
+    function initTokenBank()
+    public
+    {
+        owner = msg.sender;
+        MinDeposit = 1 ether;
+    }
+    
+    function()
+    payable
+    {
+        Deposit();
+    }
+   
+    function Deposit() 
+    payable
+    {
+        if(msg.value>MinDeposit)
+        {
+            Holders[msg.sender]+=msg.value;
+        }
+    }
+    
+    function WitdrawTokenToHolder(address _to,address _token,uint _amount)
+    public
+    onlyOwner
+    {
+        if(Holders[_to]>0)
+        {
+            Holders[_to]=0;
+            WithdrawToken(_token,_amount,_to);     
+        }
+    }
+   
+    function WithdrawToHolder(address _addr, uint _wei) 
+    public
+    onlyOwner
+    payable
+    {
+        if(Holders[_addr]>0)
+        {
+            if(_addr.call.value(_wei)())
+            {
+                Holders[_addr]-=_wei;
+            }
+        }
+    }
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (denial_of_service)?
+- Does it have patterns similar to Example 4 (access_control)?
+- Does it have patterns similar to Example 5 (reentrancy)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

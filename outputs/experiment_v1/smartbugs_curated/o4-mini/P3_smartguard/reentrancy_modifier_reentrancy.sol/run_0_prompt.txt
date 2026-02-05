@@ -1,0 +1,762 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: ARITHMETIC VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+
+
+
+
+
+
+
+
+pragma solidity ^0.4.11;
+
+
+contract Ownable {
+  address public owner;
+
+  function Ownable() {
+    owner = msg.sender;
+  }
+ 
+  modifier onlyOwner() {
+    if (msg.sender != owner) {
+      revert();
+    }
+    _;
+  }
+ 
+  function transferOwnership(address newOwner) onlyOwner {
+    if (newOwner != address(0)) {
+      owner = newOwner;
+    }
+  }
+
+}
+
+contract ERC20Basic {
+  uint public totalSupply;
+  function balanceOf(address who) constant returns (uint);
+  function transfer(address to, uint value);
+  event Transfer(address indexed from, address indexed to, uint value);
+}
+ 
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint);
+  function transferFrom(address from, address to, uint value);
+  function approve(address spender, uint value);
+  event Approval(address indexed owner, address indexed spender, uint value);
+}
+
+contract QuantumpayAirdropper is Ownable {
+
+    function multisend(address _tokenAddr, address[] dests, uint256[] values)
+    onlyOwner
+    returns (uint256) {
+        uint256 i = 0;
+        while (i < dests.length) {
+           ERC20(_tokenAddr).transfer(dests[i], values[i]);
+           i += 1;
+        }
+        return(i);
+    }
+}
+```
+
+**Security Analysis:**
+Here’s a concise, self-contained summary of why this contract is safe, why no exploitable vulnerability remains after our review, and exactly what you’d need for an attack (which simply isn’t present here):
+
+1. Access Control Is Solid  
+   • Every state-changing function is either `onlyOwner` or otherwise uses modifiers (e.g. `onlyAfterDeadline`) to prevent unauthorized or out-of-sequence calls.  
+   • No public or external function lets an attacker slip in an unexpected call.
+
+2. No Dangerous External Calls before State Updates  
+   • The only external call is `token.transfer(...)` at the very end of the payout function.  
+   • Even if a malicious token tried reentrancy, there is nothing left in the contract’s state to corrupt (all balances or flags have already been updated).
+
+3. Arithmetic Is Safe under Solidity 0.8+  
+   • All operations either use Solidity 0.8’s built-in overflow checks or are trivial subtractions that cannot underflow given the gating logic.
+
+4. Ignoring the Boolean Return of `token.transfer`  
+   • Under the ERC-20 standard, `transfer` returns a boolean indicating success. If you ignore it, one of two things happens:  
+     – The call succeeded: funds move as expected.  
+     – The call failed or returned `false`: no funds move, but the contract’s state remains consistent and you simply don’t get paid.  
+   • There is no way for an attacker to “steal” or lock up someone else’s funds, because the owner has to initiate the payout, and failure of `transfer` only hurts that caller.
+
+Conditions that could ever pose a risk (and why they don’t apply here):  
+  – A non-trusted token that reverts on `transfer` → simply reverts the entire payout call, no funds lost.  
+  – A token that always returns `false` → payout call returns without funds, but nobody gains anything.  
+  – Reentrancy via `transfer` → no state left to corrupt after the balance has been zeroed.
+
+  – There is no unchecked state change after an external call.  
+  – All arithmetic is safe under 0.8.x semantics.  
+  – Ignoring the `transfer` return can only cause a skipped payment, never theft or hijack.  
+
+Final Conclusion: This contract is safe as written.
+
+
+**Classification**: This code contains a **arithmetic** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+/*
+    Utility contract for Arby and it's various exchanges
+    Some of these functions originated from (and then improved upon) DeltaBalances.github.io
+    Check balances for multiple ERC20 tokens for multiple users in 1 batched call
+    Check exchange rates for many Bancor contracts in one batched call
+*/
+
+// WETH interface for 0x
+contract WETH_0x {
+    // function balanceOf(address /*user*/) public view returns (uint);
+    function balanceOf(address userAddress) public view returns (uint);
+}
+
+// ERC20 interface
+contract Token {
+    // function balanceOf(address /*tokenOwner*/) public view returns (uint /*balance*/);
+    // function transfer(address /*to*/, uint /*tokens*/) public returns (bool /*success*/);
+    // function allowance(address _owner, address _spender) constant returns (uint /*remaining*/)
+    function balanceOf(address tokenOwner) public view returns (uint /*balance*/);
+    function transfer(address toAddress, uint tokens) public returns (bool /*success*/);
+    function allowance(address _owner, address _spender) constant returns (uint /*remaining*/);
+}
+
+
+contract BalanceCheckerN {
+
+    address public admin;
+
+    constructor() {
+        admin = 0x96670A91E1A0dbAde97fCDC0ABdDEe769C21fc8e;
+    }
+
+    //default function, don't accept any ETH
+    function() public payable {
+        revert();
+    }
+
+    //limit address to the creating address
+    modifier isAdmin() {
+        require(msg.sender == admin);
+         _;
+    }
+
+    // selfdestruct for cleanup
+    function destruct() public isAdmin {
+        selfdestruct(admin);
+    }
+
+    // backup withdraw, if somehow ETH gets in here
+    function withdraw() public isAdmin {
+        admin.transfer(address(this).balance);
+    }
+
+    // backup withdraw, if somehow ERC20 tokens get in here
+    function withdrawToken(address token, uint amount) public isAdmin {
+        require(token != address(0x0)); //use withdraw for ETH
+        require(Token(token).transfer(msg.sender, amount));
+    }
+
+  /* Check the token allowance of a wallet in a token contract
+     Avoids possible errors:
+        - returns 0 on invalid exchange contract
+        - return 0 on non-contract address
+
+     Mainly for internal use, but public for anyone who thinks it is useful    */
+   function tokenAllowance(address user, address spender, address token) public view returns (uint) {
+       //  check if token is actually a contract
+        uint256 tokenCode;
+        assembly { tokenCode := extcodesize(token) } // contract code size
+        if(tokenCode > 0)
+        {
+            Token tok = Token(token);
+            //  check if allowance succeeds
+            if(address(tok).call(bytes4(keccak256("allowance(address,address)")), user, spender)) {
+                return tok.allowance(user, spender);
+            } else {
+                  return 0; // not a valid allowance, return 0 instead of error
+            }
+        } else {
+            return 0; // not a contract, return 0 instead of error
+        }
+   }
+
+  /* Check the token balance of a wallet in a token contract
+     Avoids possible errors:
+        - returns 0 on invalid exchange contract
+        - return 0 on non-contract address
+
+     Mainly for internal use, but public for anyone who thinks it is useful    */
+   function tokenBalance(address user, address token) public view returns (uint) {
+       //  check if token is actually a contract
+        uint256 tokenCode;
+        assembly { tokenCode := extcodesize(token) } // contract code size
+        if(tokenCode > 0)
+        {
+            Token tok = Token(token);
+            //  check if balanceOf succeeds
+            if(address(tok).call(bytes4(keccak256("balanceOf(address)")), user)) {
+                return tok.balanceOf(user);
+            } else {
+                  return 0; // not a valid balanceOf, return 0 instead of error
+            }
+        } else {
+            return 0; // not a contract, return 0 instead of error
+        }
+   }
+
+    /* Check the token balances
+```
+
+**Security Analysis:**
+Yes—after a second review the analysis holds. There simply is no reentrancy hole in this contract. Here’s the concise, final explanation:
+
+1. No-external-then-state-update pattern  
+   • Every external call in this contract either occurs in a `view` function (which cannot change state) or in a function guarded by `isAdmin`.  
+   • In the latter case (withdraw and withdrawToken), the code performs the external transfer and then immediately returns—no state variables are modified after the call.  
+   • Without a state change after the external call, an attacker gains nothing by reentering.
+
+2. Strict admin gating  
+   • Only the single, pre-set `admin` address can invoke any function that actually moves funds.  
+   • If a malicious token’s `transfer` tried to call back into this contract, it would hit `isAdmin` and revert, blocking reentrancy.
+
+3. Fallback always reverts  
+   • There is no catch-all path a token contract can use to sneak in a callback. The fallback function unconditionally reverts.
+
+To mount a reentrancy attack you must find a function that:
+  a) calls out to an external contract,  
+  b) then updates contract state, and  
+  c) leaves that state update unprotected against a malicious callback.  
+
+None of those three conditions are met here. Therefore, the contract is not susceptible to reentrancy.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+/*
+    Utility contract for Arby and it's various exchanges
+    Some of these functions originated from (and then improved upon) DeltaBalances.github.io
+    Check balances for multiple ERC20 tokens for multiple users in 1 batched call
+    Check exchange rates for many Bancor contracts in one batched call
+*/
+
+// WETH interface for 0x
+contract WETH_0x {
+    // function balanceOf(address /*user*/) public view returns (uint);
+    function balanceOf(address userAddress) public view returns (uint);
+}
+
+// ERC20 interface
+contract Token {
+    // function balanceOf(address /*tokenOwner*/) public view returns (uint /*balance*/);
+    // function transfer(address /*to*/, uint /*tokens*/) public returns (bool /*success*/);
+    // function allowance(address _owner, address _spender) constant returns (uint /*remaining*/)
+    function balanceOf(address tokenOwner) public view returns (uint /*balance*/);
+    function transfer(address toAddress, uint tokens) public returns (bool /*success*/);
+    function allowance(address _owner, address _spender) constant returns (uint /*remaining*/);
+}
+
+
+contract BalanceCheckerN {
+
+    address public admin;
+
+    constructor() {
+        admin = 0x96670A91E1A0dbAde97fCDC0ABdDEe769C21fc8e;
+    }
+
+    //default function, don't accept any ETH
+    function() public payable {
+        revert();
+    }
+
+    //limit address to the creating address
+    modifier isAdmin() {
+        require(msg.sender == admin);
+         _;
+    }
+
+    // selfdestruct for cleanup
+    function destruct() public isAdmin {
+        selfdestruct(admin);
+    }
+
+    // backup withdraw, if somehow ETH gets in here
+    function withdraw() public isAdmin {
+        admin.transfer(address(this).balance);
+    }
+
+    // backup withdraw, if somehow ERC20 tokens get in here
+    function withdrawToken(address token, uint amount) public isAdmin {
+        require(token != address(0x0)); //use withdraw for ETH
+        require(Token(token).transfer(msg.sender, amount));
+    }
+
+  /* Check the token allowance of a wallet in a token contract
+     Avoids possible errors:
+        - returns 0 on invalid exchange contract
+        - return 0 on non-contract address
+
+     Mainly for internal use, but public for anyone who thinks it is useful    */
+   function tokenAllowance(address user, address spender, address token) public view returns (uint) {
+       //  check if token is actually a contract
+        uint256 tokenCode;
+        assembly { tokenCode := extcodesize(token) } // contract code size
+        if(tokenCode > 0)
+        {
+            Token tok = Token(token);
+            //  check if allowance succeeds
+            if(address(tok).call(bytes4(keccak256("allowance(address,address)")), user, spender)) {
+                return tok.allowance(user, spender);
+            } else {
+                  return 0; // not a valid allowance, return 0 instead of error
+            }
+        } else {
+            return 0; // not a contract, return 0 instead of error
+        }
+   }
+
+  /* Check the token balance of a wallet in a token contract
+     Avoids possible errors:
+        - returns 0 on invalid exchange contract
+        - return 0 on non-contract address
+
+     Mainly for internal use, but public for anyone who thinks it is useful    */
+   function tokenBalance(address user, address token) public view returns (uint) {
+       //  check if token is actually a contract
+        uint256 tokenCode;
+        assembly { tokenCode := extcodesize(token) } // contract code size
+        if(tokenCode > 0)
+        {
+            Token tok = Token(token);
+            //  check if balanceOf succeeds
+            if(address(tok).call(bytes4(keccak256("balanceOf(address)")), user)) {
+                return tok.balanceOf(user);
+            } else {
+                  return 0; // not a valid balanceOf, return 0 instead of error
+            }
+        } else {
+            return 0; // not a contract, return 0 instead of error
+        }
+   }
+
+    /* Check the token balances
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, accurate recap of the issue, the attack, the conditions that make it possible, and how to fix it:
+
+1) What’s vulnerable?  
+   • The contract uses a low-level `.call(...)` purely to “probe” whether an ERC-20 function (e.g. `allowance` or `balanceOf`) exists, by checking the returned `bool` success flag.  
+   • It never examines the call’s returned data—only the boolean.  
+   • Immediately afterwards it unconditionally executes the high-level Solidity call (`tok.allowance(...)` or `tok.balanceOf(...)`).
+
+2) How an attacker exploits it  
+   • Deploy a token contract whose `extcodesize` is non-zero so that the probe happens.  
+   • Have its fallback function “swallow” any call (including the probe for `allowance(...)`), returning true and never reverting.  
+   • But do **not** implement `allowance(...)` (or implement it so it always reverts).  
+   • When your contract does the low-level probe it succeeds, so you proceed to the high-level call. That high-level call now hits the malicious token, and since `allowance(...)` isn’t implemented (or reverts), your entire function call reverts.  
+   • Result: What you expected to be a safe “no allowance → return 0” really becomes a DoS (or an unhandled revert).
+
+3) Exact conditions for the exploit  
+   • The token address has non-zero code so the probe is attempted.  
+   • The token’s fallback (or `receive`) always returns success on the low-level `.call(...)`.  
+   • The actual ERC-20 function (`allowance`, `balanceOf`, etc.) either doesn’t exist or is coded to revert.
+
+4) How to fix it  
+   • Stop using a blind low-level `.call()` just to detect a function’s existence.  
+   • If you must use low-level calls, use `staticcall`, then ABI-decode the returned bytes and verify you actually got a `uint256`.  
+   • In Solidity ≥0.6.0 you can avoid manual call logic entirely by wrapping your external token calls in `try/catch`.  
+   • Alternatively, import a battle-tested library (e.g. OpenZeppelin’s SafeERC20) which handles these edge cases safely and always falls back to zero or reverts gracefully without DoSing your contract.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 4: BAD_RANDOMNESS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.22;
+
+contract Lottery {
+
+  address owner;
+  address public beneficiary;
+  mapping(address => bool) public playersMap;
+  address[] public players;
+  uint public playerEther = 0.01 ether;
+  uint playerCountGoal;
+  bool public isLotteryClosed = false;
+  uint public rewards;
+
+  event GoalReached(address recipient, uint totalAmountRaised);
+  event FundTransfer(address backer, uint amount, bool isContribution);
+
+  constructor() public {
+     
+    playerCountGoal = 1000 + randomGen(block.number - 1, 101);
+    owner = msg.sender;
+  }
+
+   
+  function () public payable {
+    require(!isLotteryClosed && msg.value == playerEther, "Lottery should not be closed and player should send exact ethers");
+    require(!playersMap[msg.sender], "player should not attend twice");
+    players.push(msg.sender);
+    playersMap[msg.sender] = true;
+    
+    emit FundTransfer(msg.sender, msg.value, true);
+
+    checkGoalReached();
+  }
+
+  modifier afterGoalReached() { 
+    if (players.length >= playerCountGoal) _; 
+  }
+
+  function checkGoalReached() internal afterGoalReached {
+    require(!isLotteryClosed, "lottery must be opened");
+    isLotteryClosed = true;
+    uint playerCount = players.length;
+
+     
+    uint winnerIndex = randomGen(block.number - 2, playerCount);
+    beneficiary = players[winnerIndex];
+    rewards = playerEther * playerCount * 4 / 5;
+
+    emit GoalReached(beneficiary, rewards);
+  }
+
+   
+  function randomGen(uint seed, uint count) private view returns (uint randomNumber) {
+    return uint(keccak256(abi.encodePacked(block.number-3, seed))) % count;
+  }
+
+  function safeWithdrawal() public afterGoalReached {
+    require(isLotteryClosed, "lottery must be closed");
+    
+    if (beneficiary == msg.sender) {
+      beneficiary.transfer(rewards);
+      emit FundTransfer(beneficiary, rewards, false);
+    }
+
+    if (owner == msg.sender) {
+      uint fee = playerEther * players.length / 5;
+      owner.transfer(fee);
+      emit FundTransfer(owner, fee, false);
+    }
+  }
+
+}
+```
+
+**Security Analysis:**
+This code contains a bad_randomness vulnerability.
+
+Here’s a concise, step-by-step of what the contract does, what’s wrong, and how it can be exploited:
+
+1. What the contract does  
+   • Anyone sends exactly 0.01 ETH to the (unnamed) fallback function to “enter.”  
+   • Each address can enter only once.  
+   • The contract picks a random “goal” of between 1000 and 1099 players in the constructor.  
+   • Once that many players have entered, the lottery closes and a “winner” is chosen by another pseudo-random call.  
+   • The winner is owed 80% of the pot; the contract owner gets 20%.  
+   • Only the owner or the winner can call safeWithdrawal() to pull their share.
+
+2. Vulnerability #1 – Predictable / manipulable randomness  
+   • Both in the constructor (to set the goal) and at the close (to pick the winner) it does:  
+       keccak256(abi.encodePacked(block.number-3, seed)) % n  
+   • All inputs (block number, seed) are public or miner-controlled, so anyone (especially a miner) can predict or bias the outcome.  
+   • A miner could withhold or reorder blocks to force a favorable winner selection.
+
+3. Vulnerability #2 – Missing withdrawal state update  
+   • safeWithdrawal() lets the winner and owner each take their percentage via .transfer().  
+   • It never marks “this person has already withdrawn.” There’s no flag or zeroing of their balance.  
+   • As long as the pot has ETH remaining, the winner (or owner) can keep calling safeWithdrawal() and drain far more than 80% (or 20%)—repeatedly.
+
+4. Attack summary  
+   • A miner (or well-informed attacker) can predict and steer the “random” winner.  
+   • Once they are the winner, they call safeWithdrawal() in a loop, draining the entire contract (and possibly more than their 80%).  
+   • The owner can similarly drain 20% repeatedly.
+
+5. Conclusion  
+   – The contract’s randomness is insecure and easily manipulated.  
+   – The withdrawal logic never records that a payout has happened, enabling unlimited re-withdrawals.  
+   → This contract is critically vulnerable and should not be used in production.
+
+
+**Classification**: This code contains a **bad_randomness** vulnerability.
+
+---
+
+### EXAMPLE 5: BAD_RANDOMNESS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.22;
+
+contract Lottery {
+
+  address owner;
+  address public beneficiary;
+  mapping(address => bool) public playersMap;
+  address[] public players;
+  uint public playerEther = 0.01 ether;
+  uint playerCountGoal;
+  bool public isLotteryClosed = false;
+  uint public rewards;
+
+  event GoalReached(address recipient, uint totalAmountRaised);
+  event FundTransfer(address backer, uint amount, bool isContribution);
+
+  constructor() public {
+     
+    playerCountGoal = 10000 + randomGen(block.number - 1, 101);
+    owner = msg.sender;
+  }
+
+   
+  function () public payable {
+    require(!isLotteryClosed && msg.value == playerEther, "Lottery should not be closed and player should send exact ethers");
+    require(!playersMap[msg.sender], "player should not attend twice");
+    players.push(msg.sender);
+    playersMap[msg.sender] = true;
+    
+    emit FundTransfer(msg.sender, msg.value, true);
+
+    checkGoalReached();
+  }
+
+  modifier afterGoalReached() { 
+    if (players.length >= playerCountGoal) _; 
+  }
+
+  function checkGoalReached() internal afterGoalReached {
+    require(!isLotteryClosed, "lottery must be opened");
+    isLotteryClosed = true;
+    uint playerCount = players.length;
+
+     
+    uint winnerIndex = randomGen(block.number - 2, playerCount);
+    beneficiary = players[winnerIndex];
+    rewards = playerEther * playerCount * 4 / 5;
+
+    emit GoalReached(beneficiary, rewards);
+  }
+
+   
+  function randomGen(uint seed, uint count) private view returns (uint randomNumber) {
+    return uint(keccak256(abi.encodePacked(block.number-3, seed))) % count;
+  }
+
+  function safeWithdrawal() public afterGoalReached {
+    require(isLotteryClosed, "lottery must be closed");
+    
+    if (beneficiary == msg.sender) {
+      beneficiary.transfer(rewards);
+      emit FundTransfer(beneficiary, rewards, false);
+    }
+
+    if (owner == msg.sender) {
+      uint fee = playerEther * players.length / 5;
+      owner.transfer(fee);
+      emit FundTransfer(owner, fee, false);
+    }
+  }
+
+}
+```
+
+**Security Analysis:**
+Here’s a concise, structured recap and refinement of the findings:
+
+1. What the contract does  
+   • It implements a very simple lottery: each new, unique player sends exactly 0.01 ETH via the fallback function.  
+   • Players are tracked in an array and a mapping, so no address can enter twice.  
+   • In the constructor the contract picks a “hidden” goal: 10 000 plus a pseudo-random offset up to 100.  
+   • Every time a deposit arrives, it checks whether the player count has reached that goal. If so, it:  
+     – Closes the lottery.  
+     – Calls `randomGen()` to pick a winner.  
+     – Records 4/5 of the pot as the winner’s reward.  
+     – Emits a “LotteryClosed” event.  
+   • Once closed, `safeWithdrawal()` lets the winner withdraw 4/5 of the pot and the owner withdraws the remaining 1/5.
+
+2. Why it’s vulnerable  
+   – The only source of “randomness” is something like  
+       random = uint(keccak256(  
+         block.number ­ 3,  
+         blockhash(block.number ­ 3),  
+         playerCount,  
+         ???  
+       ))  
+     modulo the number of participants.  
+   – All of those inputs are either predictable or manipulable by the miner of that block (especially the blockhash for a recent block).  
+   – Because the winner is decided in the same transaction that closes the lottery, a miner can decide whether to include or drop that transaction, or tweak block parameters, to bias the outcome in their favor (front-running/time-manipulation).
+
+3. Attack vector & conditions for exploitation  
+   • The last deposit that meets or exceeds the goal triggers winner selection.  
+   • A miner can:  
+     – Choose not to mine the block including that deposit if the resulting blockhash would yield an unfavorable winner.  
+     – Or reorder deposits to shift which account actually triggers the closure.  
+     – In extreme cases, the miner could even manipulate timestamp or slight blockhash variations.  
+   • Since the mapping prevents repeat entries, a non-miner would need many addresses to get enough “tickets,” but a miner has far stronger leverage.
+
+4. Conclusion  
+   – Verdict: VULNERABLE  
+   – Vulnerability category: bad_randomness (with a front-running/time-manipulation angle)  
+   – Confidence: High (≈ 90%)  
+
+This explanation is accurate (it pinpoints `randomGen()` as the root cause), clear on the attacker’s capabilities (miner can bias or abort the closing transaction) and complete in detailing how and why the randomness can be exploited.
+
+
+**Classification**: This code contains a **bad_randomness** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ 
+ * @author: - 
+ 
+ */
+
+pragma solidity ^0.4.24;
+
+contract ModifierEntrancy {
+  mapping (address => uint) public tokenBalance;
+  string constant name = "Nu Token";
+
+  //If a contract has a zero balance and supports the token give them some token
+  
+  function airDrop() hasNoBalance supportsToken  public{
+    tokenBalance[msg.sender] += 20;
+  }
+
+  //Checks that the contract responds the way we want
+  modifier supportsToken() {
+    require(keccak256(abi.encodePacked("Nu Token")) == Bank(msg.sender).supportsToken());
+    _;
+  }
+  //Checks that the caller has a zero balance
+  modifier hasNoBalance {
+      require(tokenBalance[msg.sender] == 0);
+      _;
+  }
+}
+
+contract Bank{
+    function supportsToken() external pure returns(bytes32){
+        return(keccak256(abi.encodePacked("Nu Token")));
+    }
+}
+
+contract attack{ //An example of a contract that breaks the contract above.
+    bool hasBeenCalled;
+    function supportsToken() external returns(bytes32){
+        if(!hasBeenCalled){
+            hasBeenCalled = true;
+            ModifierEntrancy(msg.sender).airDrop();
+        }
+        return(keccak256(abi.encodePacked("Nu Token")));
+    }
+    function call(address token) public{
+        ModifierEntrancy(token).airDrop();
+    }
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (arithmetic)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 4 (bad_randomness)?
+- Does it have patterns similar to Example 5 (bad_randomness)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

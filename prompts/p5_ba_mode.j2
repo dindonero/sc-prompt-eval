@@ -1,0 +1,124 @@
+## LLM-SmartAudit: BROAD ANALYSIS (BA) MODE
+
+Reference: Wei et al. 2024 - Thought-Reasoning Prompt based on ReAct framework (Figure 2)
+
+This audit uses Thought-Reasoning prompting that combines reasoning and acting
+to handle complex vulnerability detection tasks with adaptive thought and action.
+
+---
+
+## SPECIFIED TASK PROMPT:
+
+"Given the user's task and the brainstorming ideas provided:
+Task: \"Audit the smart contract for ALL potential security vulnerabilities\"
+Ideas: \"Comprehensive security audit, attack vectors, logic flaws, economic risks\"
+
+As the {{ agent_role }}, your chief priority is to thoroughly inspect
+the given contract code and identify all potential vulnerabilities.
+It's crucial to ensure the contract's security and operability."
+
+---
+
+## AGENT ROLES IN BA MODE (Task Queue per Figure 3):
+
+### Phase 1 - Contract Analysis:
+- PROJECT MANAGER (User Agent): Sets audit goals and scope
+- SMART CONTRACT AUDITOR (Assistant Agent): Assesses contract structure
+- COUNSELOR: Summarizes Phase 1 findings
+
+### Phase 2 - Vulnerability Identification:
+- SMART CONTRACT AUDITOR (alternates User/Assistant): Identifies vulnerabilities
+- SOLIDITY PROGRAMMING EXPERT (alternates Assistant/User): Verifies findings
+- Role exchanges occur to reduce false positives (Figure 5b)
+- Maximum {{ max_rounds | default(3) }} consensus rounds
+
+### Phase 3 - Comprehensive Report:
+- AUDITOR + EXPERT: Joint final report generation
+
+---
+
+{% if counselor_guidance %}
+## COUNSELOR'S STRATEGIC GUIDANCE:
+{{ counselor_guidance }}
+{% endif %}
+
+---
+
+## CONTRACT TO AUDIT:
+```solidity
+{{ contract_source }}
+```
+
+---
+
+## THOUGHT-REASONING STRUCTURE (ReAct Pattern):
+
+For each analysis step, follow this pattern:
+
+**THOUGHT**: What aspect of the contract am I analyzing?
+**ACTION**: What specific security check am I performing?
+**OBSERVATION**: What patterns or issues did I find in the code?
+**RESULT**: Is there a vulnerability? Document it with evidence.
+
+### Example:
+**THOUGHT**: I need to check for reentrancy vulnerabilities in functions that make external calls.
+**ACTION**: Scanning all functions for external calls (call, send, transfer) and checking state update order.
+**OBSERVATION**: The withdraw() function at line 45 makes an external call before updating balances.
+**RESULT**: VULNERABILITY FOUND - Reentrancy in withdraw(), state updated after external call.
+
+---
+
+## COMPREHENSIVE VULNERABILITY CHECKLIST:
+
+Systematically check for:
+
+1. **Reentrancy**: External calls before state updates
+2. **Access Control**: Missing or weak authorization
+3. **Arithmetic Issues**: Overflow/underflow (pre-0.8.0 or unchecked blocks)
+4. **Unchecked Calls**: Return values not validated
+5. **Denial of Service**: Gas limits, unbounded loops
+6. **Bad Randomness**: Predictable on-chain randomness
+7. **Front-Running**: Price/approval race conditions
+8. **Time Manipulation**: Timestamp dependencies
+9. **Logic Errors**: Incorrect business logic
+10. **Centralization Risks**: Single points of failure
+
+---
+
+## OUTPUT FORMAT:
+
+For each vulnerability identified, use the following format:
+
+*VULNERABILITY NAME or TYPE*
+- Category: DASP category (reentrancy, access_control, arithmetic, etc.)
+- Severity: low|medium|high|critical
+- Confidence: 0.0-1.0
+- Location: function_name at lines X-Y
+...
+DETAILED DESCRIPTION of the vulnerability, its potential impact,
+and recommended mitigation or fix.
+...
+
+```json
+[
+  {
+    "category": "DASP category",
+    "title": "Vulnerability title",
+    "severity": "low|medium|high|critical",
+    "confidence": 0.0-1.0,
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers],
+      "function": "function_name"
+    },
+    "attack_scenario": "How an attacker could exploit this",
+    "explanation": "Detailed explanation",
+    "fix_suggestion": "Recommended fix"
+  }
+]
+```
+
+Once all vulnerabilities have been addressed, indicate completion:
+"<INFO> Analysis Complete."
+
+If no vulnerabilities found: "<INFO> No Vulnerabilities Detected."

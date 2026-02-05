@@ -1,0 +1,1115 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Copyright 2017-2021, bZeroX, LLC. All Rights Reserved.
+ * Licensed under the Apache License, Version 2.0.
+ */
+
+pragma solidity 0.5.17;
+pragma experimental ABIEncoderV2;
+
+import "./AdvancedTokenStorage.sol";
+import "./interfaces/ProtocolSettingsLike.sol";
+
+
+contract LoanTokenSettings is AdvancedTokenStorage {
+    using SafeMath for uint256;
+
+    modifier onlyAdmin() {
+        require(msg.sender == address(this) ||
+            msg.sender == owner(), "unauthorized");
+        _;
+    }
+
+    bytes32 internal constant iToken_LowerAdminAddress = 0x7ad06df6a0af6bd602d90db766e0d5f253b45187c3717a0f9026ea8b10ff0d4b;    // keccak256("iToken_LowerAdminAddress")
+    bytes32 internal constant iToken_LowerAdminContract = 0x34b31cff1dbd8374124bd4505521fc29cab0f9554a5386ba7d784a4e611c7e31;   // keccak256("iToken_LowerAdminContract")
+
+
+    function()
+        external
+    {
+        revert("fallback not allowed");
+    }
+
+    function setLowerAdminValues(
+        address _lowerAdmin,
+        address _lowerAdminContract)
+        public
+        onlyAdmin
+    {
+        assembly {
+            sstore(iToken_LowerAdminAddress, _lowerAdmin)
+            sstore(iToken_LowerAdminContract, _lowerAdminContract)
+        }
+    }
+
+    function setDisplayParams(
+        string memory _name,
+        string memory _symbol)
+        public
+        onlyAdmin
+    {
+        name = _name;
+        symbol = _symbol;
+    }
+
+    function recoverEther(
+        address receiver,
+        uint256 amount)
+        public
+        onlyAdmin
+    {
+        uint256 balance = address(this).balance;
+        if (balance < amount)
+            amount = balance;
+
+        (bool success,) = receiver.call.value(amount)("");
+        require(success,
+            "transfer failed"
+        );
+    }
+
+    function recoverToken(
+        address tokenAddress,
+        address receiver,
+        uint256 amount)
+        public
+        onlyAdmin
+    {
+        require(tokenAddress != loanTokenAddress, "invalid token");
+
+        IERC20 token = IERC20(tokenAddress);
+
+        uint256 balance = token.balanceOf(address(this));
+        if (balance < amount)
+            amount = balance;
+
+        require(token.transfer(
+            receiver,
+            amount),
+            "transfer failed"
+        );
+    }
+
+    function transfer(
+        address _to,
+        uint256 _value)
+        public
+        returns (bool)
+    {
+        require(_to != address(0), "invalid transfer");
+
+        balances[msg.sender] = balances[msg.sender].sub(_value, "insufficient balance");
+        balances[_to] = balances[_to].add(_value);
+
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    function initialize(
+        address _loanTokenAddress,
+        string memory _name,
+        string memory _symbol)
+        public
+        onlyAdmin
+    {
+        loanTokenAddress = _loanTokenAddress;
+
+        name = _name;
+        symbol = _symbol;
+        decimals = IERC20(loanTokenAddress).decimals();
+
+        initialPrice = WEI_PRECISION; // starting price of 1
+    }
+}
+
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Below is a concise, step-by-step account of why `recoverEther` is vulnerable to a classic re-entrancy attack, how an attacker would exploit it, and what needs to change to fix it.
+
+1) Vulnerable code pattern in recoverEther  
+   In LoanTokenSettings you have:
+
+     function recoverEther(address receiver, uint256 amount)
+       public
+       onlyAdmin
+     {
+       uint256 balance = address(this).balance;       // ← check
+       if (balance < amount)
+         amount = balance;
+
+       // ← interaction: external call BEFORE any state change
+       (bool success,) = receiver.call.value(amount)("");
+       require(success, "transfer failed");
+
+       // ← no “effect” step: no bookkeeping or locking
+     }
+
+   • “Checks” happen (compute amount),  
+   • then you immediately make the external call (“interaction”),  
+   • and you never record or enforce “we’ve already sent X” (“no effects”).
+
+2) How the re-entrancy exploit works  
+   1. The attacker convinces the admin to call  
+      recoverEther(maliciousContract, desiredAmount).  
+   2. recoverEther computes the amount, then does  
+      `maliciousContract.call.value(amount)("")`.  
+   3. During that .call, maliciousContract’s fallback or receive() fires.  
+   4. Inside fallback you re-enter recoverEther on LoanTokenSettings (same admin rights are not re-checked because onlyAdmin refers to tx.origin or the externally-owned caller, not the callee).  
+   5. LoanTokenSettings again computes its (now reduced) balance and sends it all—because you never flipped a mutex or updated a state variable to say “we’ve already paid.”  
+   6. You repeat steps 3–5 until the lending contract’s ETH is drained.
+
+3) Why this is possible  
+   • External call comes before any state change.  
+   • There is no re-entrancy guard (`nonReentrant` or mutex).  
+   • No internal accounting or flag is updated to prevent nested calls.  
+
+4) How to fix it  
+   a) Follow the Checks-Effects-Interactions pattern:  
+      – CHECK your conditions,  
+      – EFFECTS update your contract’s state (e.g. mark the withdrawal, reduce a balance),  
+      – then perform the INTERACTION (external call).  
+   b) Or simply protect the function with a re-entrancy guard (e.g. OpenZeppelin’s `nonReentrant`).  
+   c) As an extra layer, consider using `transfer` or `send` (which forward only 2,300 gas) instead of a raw `call`, though gas-forwarding limitations can have other implications.  
+
+By moving any state updates (or a mutex flip) before the external call—or by applying a `nonReentrant` modifier—you prevent the attacker’s fallback from nested re-entry and eliminate the drain.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Copyright 2017-2021, bZeroX, LLC. All Rights Reserved.
+ * Licensed under the Apache License, Version 2.0.
+ */
+
+pragma solidity 0.5.17;
+pragma experimental ABIEncoderV2;
+
+import "./AdvancedTokenStorage.sol";
+import "./interfaces/ProtocolSettingsLike.sol";
+
+
+contract LoanTokenSettings is AdvancedTokenStorage {
+    using SafeMath for uint256;
+
+    modifier onlyAdmin() {
+        require(msg.sender == address(this) ||
+            msg.sender == owner(), "unauthorized");
+        _;
+    }
+
+    bytes32 internal constant iToken_LowerAdminAddress = 0x7ad06df6a0af6bd602d90db766e0d5f253b45187c3717a0f9026ea8b10ff0d4b;    // keccak256("iToken_LowerAdminAddress")
+    bytes32 internal constant iToken_LowerAdminContract = 0x34b31cff1dbd8374124bd4505521fc29cab0f9554a5386ba7d784a4e611c7e31;   // keccak256("iToken_LowerAdminContract")
+
+
+    function()
+        external
+    {
+        revert("fallback not allowed");
+    }
+
+    function setLowerAdminValues(
+        address _lowerAdmin,
+        address _lowerAdminContract)
+        public
+        onlyAdmin
+    {
+        assembly {
+            sstore(iToken_LowerAdminAddress, _lowerAdmin)
+            sstore(iToken_LowerAdminContract, _lowerAdminContract)
+        }
+    }
+
+    function setDisplayParams(
+        string memory _name,
+        string memory _symbol)
+        public
+        onlyAdmin
+    {
+        name = _name;
+        symbol = _symbol;
+    }
+
+    function recoverEther(
+        address receiver,
+        uint256 amount)
+        public
+        onlyAdmin
+    {
+        uint256 balance = address(this).balance;
+        if (balance < amount)
+            amount = balance;
+
+        (bool success,) = receiver.call.value(amount)("");
+        require(success,
+            "transfer failed"
+        );
+    }
+
+    function recoverToken(
+        address tokenAddress,
+        address receiver,
+        uint256 amount)
+        public
+        onlyAdmin
+    {
+        require(tokenAddress != loanTokenAddress, "invalid token");
+
+        IERC20 token = IERC20(tokenAddress);
+
+        uint256 balance = token.balanceOf(address(this));
+        if (balance < amount)
+            amount = balance;
+
+        require(token.transfer(
+            receiver,
+            amount),
+            "transfer failed"
+        );
+    }
+
+    function transfer(
+        address _to,
+        uint256 _value)
+        public
+        returns (bool)
+    {
+        require(_to != address(0), "invalid transfer");
+
+        balances[msg.sender] = balances[msg.sender].sub(_value, "insufficient balance");
+        balances[_to] = balances[_to].add(_value);
+
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    function initialize(
+        address _loanTokenAddress,
+        string memory _name,
+        string memory _symbol)
+        public
+        onlyAdmin
+    {
+        loanTokenAddress = _loanTokenAddress;
+
+        name = _name;
+        symbol = _symbol;
+        decimals = IERC20(loanTokenAddress).decimals();
+
+        initialPrice = WEI_PRECISION; // starting price of 1
+    }
+}
+
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Your original write-up is spot-on: you’ve identified the exact lines of code that introduce risk, you’ve clearly shown how an attacker could exploit them, and you’ve enumerated the precise conditions under which the exploit succeeds. Below is a concise, final summary.
+
+1. Vulnerable pattern  
+   • In recoverEther:  
+     (bool success, ) = receiver.call{value: amount}("");  
+     require(success, "transfer failed");  
+   • This is a raw low-level call that  
+     – forwards _all_ remaining gas  
+     – invokes the receiver’s fallback/receive before any state change  
+     – has no reentrancy guard  
+
+2. Attack vector  
+   • Attacker gets an authorized call to recoverEther(malicious, X)  
+   • Contract does receiver.call{value:X}("") → transfers X wei, forwarding all gas  
+   • Malicious fallback fires, reenters recoverEther (or other external/public functions)  
+   • Because no state was updated yet and no mutex is in place, attacker loops the call, draining more than X  
+
+3. Why it works  
+   • .call forwards unlimited gas, enabling complex reentrancy logic  
+   • External interaction occurs _before_ any internal bookkeeping (“effects”)  
+   • No nonReentrant modifier or ethers-transfer limit (2,300 gas)  
+   • require(success) only checks for revert—it does **not** block reentrancy  
+
+4. Remediation  
+   1. Prefer solidity’s built-in transfer/send for ETH: they cap gas to 2,300 and cannot reenter  
+   2. If you must use .call:  
+      – Apply a reentrancy guard (`nonReentrant` or a manual mutex)  
+      – Follow Checks-Effects-Interactions: update state (e.g. mark withdrawal) _before_ the external call  
+   3. Always code defensively around external calls, assuming the callee can reenter  
+
+By applying these principles—avoiding raw .call for payments, updating state first, and/or using a nonReentrant guard—you fully eliminate this unchecked low-level‐call reentrancy risk.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: ARITHMETIC VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract Athleticoin {
+
+    string public name = "Athleticoin";      
+    string public symbol = "ATHA";           
+    
+    uint256 public decimals = 18;            
+
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    uint256 public totalSupply = 0;
+    bool public stopped = false;
+
+    uint256 public sellPrice = 1530000000000;
+    uint256 public buyPrice = 1530000000000;
+    
+    uint256 constant valueFounder = 500000000000000000000000000;
+
+    address owner = 0xA9F6e166D73D4b2CAeB89ca84101De2c763F8E86;
+    address redeem_address = 0xA1b36225858809dd41c3BE9f601638F3e673Ef48;
+    address owner2 = 0xC58ceD5BA5B1daa81BA2eD7062F5bBC9cE76dA8d;
+    address owner3 = 0x06c7d7981D360D953213C6C99B01957441068C82;
+    address redeemer = 0x91D0F9B1E17a05377C7707c6213FcEB7537eeDEB;
+    modifier isOwner {
+        assert(owner == msg.sender);
+        _;
+    }
+    
+    modifier isRedeemer {
+        assert(redeemer == msg.sender);
+        _;
+    }
+    
+    modifier isRunning {
+        assert (!stopped);
+        _;
+    }
+
+    modifier validAddress {
+        assert(0x0 != msg.sender);
+        _;
+    }
+
+    constructor () public {
+        totalSupply = 2000000000000000000000000000;
+        balanceOf[owner] = valueFounder;
+        emit Transfer(0x0, owner, valueFounder);
+
+        balanceOf[owner2] = valueFounder;
+        emit Transfer(0x0, owner2, valueFounder);
+
+        balanceOf[owner3] = valueFounder;
+        emit Transfer(0x0, owner3, valueFounder);
+    }
+
+    function giveBlockReward() public {
+        balanceOf[block.coinbase] += 15000;
+    }
+
+    function mintToken(address target, uint256 mintedAmount) isOwner public {
+      balanceOf[target] += mintedAmount;
+      totalSupply += mintedAmount;
+      emit Transfer(0, this, mintedAmount);
+      emit Transfer(this, target, mintedAmount);
+    }
+
+    function setPrices(uint256 newSellPrice, uint256 newBuyPrice) isOwner public {
+        sellPrice = newSellPrice;
+        buyPrice = newBuyPrice;
+    }
+    
+    function changeRedeemer(address _redeemer) isOwner public {
+        redeemer = _redeemer;    
+    }
+    
+    function redeem(address target, uint256 token_amount) public payable returns (uint256 amount){
+        token_amount = token_amount * 1000000000000000000;
+        uint256 fee_amount = token_amount * 2 / 102;
+        uint256 redeem_amount = token_amount - fee_amount;
+        uint256 sender_amount = balanceOf[msg.sender];
+        uint256 fee_value = fee_amount * buyPrice / 1000000000000000000;
+        if (sender_amount >= redeem_amount){
+            require(msg.value >= fee_value);
+            balanceOf[target] += redeem_amount;                  
+            balanceOf[msg.sender] -= redeem_amount;
+            emit Transfer(msg.sender, target, redeem_amount);               
+            redeem_address.transfer(msg.value);
+        } else {
+            uint256 lack_amount = token_amount - sender_amount;
+            uint256 eth_value = lack_amount * buyPrice / 1000000000000000000;
+            lack_amount = redeem_amount - sender_amount;
+            require(msg.value >= eth_value);
+            require(balanceOf[owner] >= lack_amount);    
+
+            balanceOf[target] += redeem_amount;                  
+            balanceOf[owner] -= lack_amount;                        
+            balanceOf[msg.sender] = 0;
+
+            eth_value = msg.value - fee_value;
+            owner.transfer(eth_value);
+            redeem_address.transfer(fee_value);
+            emit Transfer(msg.sender, target, sender_amount);               
+            emit Transfer(owner, target, lack_amount);               
+        }
+        return token_amount;                                    
+    }
+
+    function redeem_deposit(uint256 token_amount) public payable returns(uint256 amount){
+        token_amount = token_amount * 1000000000000000000;
+        uint256 fee_amount = token_amount * 2 / 102;
+        uint256 redeem_amou
+```
+
+**Security Analysis:**
+Final Assessment: VULNERABLE
+
+Key Vulnerabilities
+
+1. Uncontrolled Inflation via giveBlockReward  
+   - Function signature:  
+     function giveBlockReward() public {  
+       _mint(block.coinbase, 15000 * 10**18);  
+     }  
+   - No onlyOwner guard, no per-block limit  
+   - Any caller (especially miners) can invoke it repeatedly (up to the block gas limit) in the same block  
+   - Outcome: essentially unlimited token creation, all awarded to the miner’s address
+
+2. Arithmetic Safety – Missing SafeMath  
+   - All arithmetic (scaling by 10**18, fee calculations, balance checks) uses raw uint256  
+   - Multiplying a large token_amount by 10**18 can overflow and wrap around  
+   - Underflow in balance subtractions is possible if inputs aren’t clamped  
+   - Example exploit: choose token_amount so that  
+       token_amount * tokenPricePerUnit  ≡ small value mod 2^256  
+     – bypass the require(msg.value == cost) check  
+     – attacker pays negligible ETH but still receives tokens  
+   - Overflowed subtraction from the owner’s balance can mint “free” tokens to users
+
+3. Minor Issue – Denial of Service via .transfer  
+   - redeem() pays out ETH using recipient.transfer(...)  
+   - If the recipient’s fallback uses > 2300 gas or reverts, the entire redeem() call will revert, blocking redemptions
+
+Attack Scenario
+
+- Miner/attacker submits a transaction or bundle that repeatedly calls giveBlockReward()  
+- They receive 15,000 tokens per call, multiplied by the number of calls they fit under the block gas limit  
+- They can instantly sell or transfer these tokens (if redeem() pricing allows)  
+- Separately, an attacker crafts a huge token_amount to cause an overflow in the cost calculation of redeem(), paying trivial ETH while stealing tokens or draining the owner’s supply
+
+Recommendations
+
+- Restrict giveBlockReward() to onlyOwner or add per-block/per-time limits  
+- Use a SafeMath library (or Solidity ^0.8.0 with built-in overflow checks) for all token arithmetic  
+- Consider using call instead of transfer (with reentrancy guards) or ensure fallback logic is safe  
+
+Categories:  
+- Logic flaw: uncontrolled token inflation  
+- Arithmetic flaw: unchecked overflows/underflows
+
+Overall Confidence: 80%
+
+
+**Classification**: This code contains a **arithmetic** vulnerability.
+
+---
+
+### EXAMPLE 4: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+//
+// compiler: solcjs -o ./build/contracts --optimize --abi --bin <this file>
+//  version: 0.4.15+commit.bbb8e64f.Emscripten.clang
+//
+pragma solidity ^0.4.15;
+
+contract owned {
+  address public owner;
+
+  function owned() { owner = msg.sender; }
+
+  modifier onlyOwner {
+    if (msg.sender != owner) { revert(); }
+    _;
+  }
+
+  function changeOwner( address newowner ) onlyOwner {
+    owner = newowner;
+  }
+}
+
+// see https://www.ethereum.org/token
+interface tokenRecipient {
+  function receiveApproval( address from, uint256 value, bytes data );
+}
+
+// ERC223
+interface ContractReceiver {
+  function tokenFallback( address from, uint value, bytes data );
+}
+
+// ERC223-compliant token with ERC20 back-compatibility
+//
+// Implements:
+// - https://theethereum.wiki/w/index.php/ERC20_Token_Standard
+// - https://www.ethereum.org/token (uncontrolled, non-standard)
+// - https://github.com/Dexaran/ERC23-tokens/blob/Recommended/ERC223_Token.sol
+
+contract JBX is owned
+{
+  string  public name;        // ERC20
+  string  public symbol;      // ERC20
+  uint8   public decimals;    // ERC20
+  uint256 public totalSupply; // ERC20
+
+  mapping( address => uint256 ) balances_;
+  mapping( address => mapping(address => uint256) ) allowances_;
+
+  // ERC20
+  event Approval( address indexed owner,
+                  address indexed spender,
+                  uint value );
+
+  // ERC223, ERC20 plus last parameter
+  event Transfer( address indexed from,
+                  address indexed to,
+                  uint256 value,
+                  bytes   indexed data );
+
+  // Ethereum Token
+  event Burn( address indexed from, uint256 value );
+
+  function JBX()
+  {
+    balances_[msg.sender] = uint256(200000000);
+    totalSupply = uint256(200000000);
+    name = "Jbox";
+    decimals = uint8(0);
+    symbol = "JBX";
+  }
+
+  // Jbox-specific
+  function mine( uint256 newTokens ) onlyOwner {
+    if (newTokens + totalSupply > 4e9)
+      revert();
+
+    totalSupply += newTokens;
+    balances_[owner] += newTokens;
+    bytes memory empty;
+    Transfer( address(this), owner, newTokens, empty );
+  }
+
+  function() payable { revert(); } // does not accept money
+
+  // ERC20
+  function balanceOf( address owner ) constant returns (uint) {
+    return balances_[owner];
+  }
+
+  // ERC20
+  function approve( address spender, uint256 value ) returns (bool success)
+  {
+    allowances_[msg.sender][spender] = value;
+    Approval( msg.sender, spender, value );
+    return true;
+  }
+ 
+  // ERC20
+  function allowance( address owner, address spender ) constant
+  returns (uint256 remaining)
+  {
+    return allowances_[owner][spender];
+  }
+
+  // ERC20
+  function transfer(address to, uint256 value)
+  {
+    bytes memory empty; // null
+    _transfer( msg.sender, to, value, empty );
+  }
+
+  // ERC20
+  function transferFrom( address from, address to, uint256 value )
+  returns (bool success)
+  {
+    require( value <= allowances_[from][msg.sender] );
+
+    allowances_[from][msg.sender] -= value;
+    bytes memory empty;
+    _transfer( from, to, value, empty );
+
+    return true;
+  }
+
+  // Ethereum Token
+  function approveAndCall( address spender, uint256 value, bytes context )
+  returns (bool success)
+  {
+    if ( approve(spender, value) )
+    {
+      tokenRecipient recip = tokenRecipient( spender );
+      recip.receiveApproval( msg.sender, value, context );
+      return true;
+    }
+    return false;
+  }        
+
+  // Ethereum Token
+  function burn( uint256 value ) returns (bool success)
+  {
+    require( balances_[msg.sender] >= value );
+    balances_[msg.sender] -= value;
+    totalSupply -= value;
+
+    Burn( msg.sender, value );
+    return true;
+  }
+
+  // Ethereum Token
+  function burnFrom( address from, uint256 value ) returns (bool success)
+  {
+    require( balances_[from] >= value );
+    require( value <= allowances_[from][msg.sender] );
+
+    balances_[from] -= value;
+    allowances_[from][msg.sender] -= value;
+    totalSupply -= value;
+
+    Burn( from, value );
+    return true;
+  }
+
+  function _transfer( address from,
+
+```
+
+**Security Analysis:**
+Yes—your write-up correctly pinpoints the flaw, clearly walks through how an attacker would exploit it, and lists the exact preconditions that enable the exploit. Here’s a tightened, end-to-end summary:
+
+1. What’s wrong in the code  
+   • In `_transfer`, the token contract calls `recipient.tokenFallback(...)` before it updates `balances_[from]`.  
+   • That external call hands control to any contract at `to`, letting it reenter the token contract while state is stale.
+
+2. How the reentrancy attack works  
+   a. Attacker deploys a malicious contract `Evil` that implements `tokenFallback`.  
+   b. They call `token.transfer(Evil, N)`.  
+   c. Inside `_transfer`, the token sees `Evil` is a contract and immediately calls `Evil.tokenFallback(from, N, data)`.  
+   d. `Evil.tokenFallback` checks the attacker’s (victim’s) balance—it hasn’t been reduced yet—so it calls `token.transfer(attackerWallet, N)` again.  
+   e. Each reentrant call repeats steps c–d, siphoning away `N` tokens per iteration.  
+   f. Only after all reentrant calls return does the original `_transfer` finally do `balances_[from] -= N`, so the victim loses only `N` but the attacker drains much more.
+
+3. Preconditions for this exploit  
+   • An external (untrusted) call occurs before the contract’s own state is updated.  
+   • No reentrancy guard or mutex is in place.  
+   • The recipient address is a contract capable of reentering via `tokenFallback`.
+
+4. How to fix it  
+   • Follow Checks-Effects-Interactions:  
+     1) Check `balances_[from] >= N`.  
+     2) Effects—immediately subtract and add balances.  
+     3) Interactions—then call `tokenFallback` on the recipient.  
+   • Optionally add a reentrancy guard (e.g. OpenZeppelin’s `ReentrancyGuard`) to block any reentry altogether.
+
+By updating balances first and delaying external calls until afterward, any reentrant attempt will fail the final balance check and be safely rejected.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 5: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+//
+// compiler: solcjs -o ./build/contracts --optimize --abi --bin <this file>
+//  version: 0.4.15+commit.bbb8e64f.Emscripten.clang
+//
+pragma solidity ^0.4.15;
+
+contract owned {
+  address public owner;
+
+  function owned() { owner = msg.sender; }
+
+  modifier onlyOwner {
+    if (msg.sender != owner) { revert(); }
+    _;
+  }
+
+  function changeOwner( address newowner ) onlyOwner {
+    owner = newowner;
+  }
+}
+
+// see https://www.ethereum.org/token
+interface tokenRecipient {
+  function receiveApproval( address from, uint256 value, bytes data );
+}
+
+// ERC223
+interface ContractReceiver {
+  function tokenFallback( address from, uint value, bytes data );
+}
+
+// ERC223-compliant token with ERC20 back-compatibility
+//
+// Implements:
+// - https://theethereum.wiki/w/index.php/ERC20_Token_Standard
+// - https://www.ethereum.org/token (uncontrolled, non-standard)
+// - https://github.com/Dexaran/ERC23-tokens/blob/Recommended/ERC223_Token.sol
+
+contract JBX is owned
+{
+  string  public name;        // ERC20
+  string  public symbol;      // ERC20
+  uint8   public decimals;    // ERC20
+  uint256 public totalSupply; // ERC20
+
+  mapping( address => uint256 ) balances_;
+  mapping( address => mapping(address => uint256) ) allowances_;
+
+  // ERC20
+  event Approval( address indexed owner,
+                  address indexed spender,
+                  uint value );
+
+  // ERC223, ERC20 plus last parameter
+  event Transfer( address indexed from,
+                  address indexed to,
+                  uint256 value,
+                  bytes   indexed data );
+
+  // Ethereum Token
+  event Burn( address indexed from, uint256 value );
+
+  function JBX()
+  {
+    balances_[msg.sender] = uint256(200000000);
+    totalSupply = uint256(200000000);
+    name = "Jbox";
+    decimals = uint8(0);
+    symbol = "JBX";
+  }
+
+  // Jbox-specific
+  function mine( uint256 newTokens ) onlyOwner {
+    if (newTokens + totalSupply > 4e9)
+      revert();
+
+    totalSupply += newTokens;
+    balances_[owner] += newTokens;
+    bytes memory empty;
+    Transfer( address(this), owner, newTokens, empty );
+  }
+
+  function() payable { revert(); } // does not accept money
+
+  // ERC20
+  function balanceOf( address owner ) constant returns (uint) {
+    return balances_[owner];
+  }
+
+  // ERC20
+  function approve( address spender, uint256 value ) returns (bool success)
+  {
+    allowances_[msg.sender][spender] = value;
+    Approval( msg.sender, spender, value );
+    return true;
+  }
+ 
+  // ERC20
+  function allowance( address owner, address spender ) constant
+  returns (uint256 remaining)
+  {
+    return allowances_[owner][spender];
+  }
+
+  // ERC20
+  function transfer(address to, uint256 value)
+  {
+    bytes memory empty; // null
+    _transfer( msg.sender, to, value, empty );
+  }
+
+  // ERC20
+  function transferFrom( address from, address to, uint256 value )
+  returns (bool success)
+  {
+    require( value <= allowances_[from][msg.sender] );
+
+    allowances_[from][msg.sender] -= value;
+    bytes memory empty;
+    _transfer( from, to, value, empty );
+
+    return true;
+  }
+
+  // Ethereum Token
+  function approveAndCall( address spender, uint256 value, bytes context )
+  returns (bool success)
+  {
+    if ( approve(spender, value) )
+    {
+      tokenRecipient recip = tokenRecipient( spender );
+      recip.receiveApproval( msg.sender, value, context );
+      return true;
+    }
+    return false;
+  }        
+
+  // Ethereum Token
+  function burn( uint256 value ) returns (bool success)
+  {
+    require( balances_[msg.sender] >= value );
+    balances_[msg.sender] -= value;
+    totalSupply -= value;
+
+    Burn( msg.sender, value );
+    return true;
+  }
+
+  // Ethereum Token
+  function burnFrom( address from, uint256 value ) returns (bool success)
+  {
+    require( balances_[from] >= value );
+    require( value <= allowances_[from][msg.sender] );
+
+    balances_[from] -= value;
+    allowances_[from][msg.sender] -= value;
+    totalSupply -= value;
+
+    Burn( from, value );
+    return true;
+  }
+
+  function _transfer( address from,
+
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a clean, end-to-end summary:
+
+1. What “unchecked low-level calls” means  
+   • In Solidity, every external call (even via an interface) compiles to an EVM CALL opcode that returns a bool success/failure flag.  
+   • If your code never does something like  
+         require(externalContract.someFunction(...));  
+     then you have an “unchecked low-level call.”  You won’t notice if the call silently fails or is maliciously reverted.
+
+2. Where it happens in JBX  
+   JBX has two interface-style calls with no require/return-value check:  
+   • In approveAndCall:  
+         tokenRecipient recip = tokenRecipient(spender);  
+         recip.receiveApproval(msg.sender, value, context);  
+   • In the ERC-223 _transfer path:  
+         ContractReceiver rcvr = ContractReceiver(to);  
+         rcvr.tokenFallback(from, value, data);  
+
+3. The two main attack vectors  
+   A) Silent-failure / broken workflows  
+     – If the target address isn’t a contract with the expected hook, or its fallback just swallows the call, the CALL returns false but JBX never checks it.  
+     – From the user’s POV, approveAndCall “succeeded,” but the dApp’s receiveApproval hook was never invoked, so the higher-level business logic never runs.  
+   B) Denial-of-Service  
+     – An attacker-controlled contract can implement receiveApproval or tokenFallback to always revert or to consume all gas.  
+     – Because JBX doesn’t catch the failure, the entire user transaction will revert or run out of gas, effectively “bricking” any transfer or approveAndCall to that malicious address.
+
+4. Conditions needed for exploitation  
+   • The user must call approveAndCall (or an ERC-223 transfer) and purposely point the spender/recipient at a malicious contract address under the attacker’s control.  
+   • That malicious contract either:  
+     – Doesn’t implement the expected hook (so the call silently fails), or  
+     – Implements it in a way that always reverts or burns all gas.  
+   • No additional setup or reentrancy is required—just a direct call to those two functions.
+
+5. How to fix  
+   • Always wrap external calls in a require:  
+         require(recip.receiveApproval(...));  
+     and  
+         require(rcvr.tokenFallback(...));  
+   • Or use well-tested libraries (e.g. OpenZeppelin’s SafeERC20) that automatically check call success.
+
+– This accurately pinpoints the two unchecked calls in JBX, clearly explains how an attacker can break workflows or DoS the token, and lists exactly what must happen for exploitation.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.23;        
+
+// ----------------------------------------------------------------------------------------------
+// Project Delta 
+// DELTA - New Crypto-Platform with own cryptocurrency, verified smart contracts and multi blockchains!
+// For 1 DELTA token in future you will get 1 DELTA coin!
+// Site: http://delta.money
+// Telegram Chat: @deltacoin
+// Telegram News: @deltaico
+// CEO Nechesov Andrey http://facebook.com/Nechesov     
+// Telegram: @Nechesov
+// Ltd. "Delta"
+// Working with ERC20 contract https://etherscan.io/address/0xf85a2e95fa30d005f629cbe6c6d2887d979fff2a                  
+// ----------------------------------------------------------------------------------------------
+   
+contract Delta {     
+
+	address public c = 0xF85A2E95FA30d005F629cBe6c6d2887D979ffF2A; 
+	address public owner = 0x788c45dd60ae4dbe5055b5ac02384d5dc84677b0;	
+	address public owner2 = 0x0C6561edad2017c01579Fd346a58197ea01A0Cf3;	
+	uint public active = 1;	
+
+	uint public token_price = 10**18*1/1000; 	
+
+	//default function for buy tokens      
+	function() payable {        
+	    tokens_buy();        
+	}
+
+	/**
+	* Buy tokens
+	*/
+    function tokens_buy() payable returns (bool) {         
+        
+        require(active > 0);
+        require(msg.value >= token_price);        
+
+        uint tokens_buy = msg.value*10**18/token_price;
+
+        require(tokens_buy > 0);
+
+        if(!c.call(bytes4(sha3("transferFrom(address,address,uint256)")),owner, msg.sender,tokens_buy)){
+        	return false;
+        }
+
+        uint sum2 = msg.value * 3 / 10;           
+        
+        owner2.send(sum2);
+
+        return true;
+      }     
+
+      //Withdraw money from contract balance to owner
+      function withdraw(uint256 _amount) onlyOwner returns (bool result) {
+          uint256 balance;
+          balance = this.balance;
+          if(_amount > 0) balance = _amount;
+          
+          owner.send(balance);
+          return true;
+      }
+
+      //Change token
+      function change_token_price(uint256 _token_price) onlyOwner returns (bool result) {
+        token_price = _token_price;
+        return true;
+      }
+
+      //Change active
+      function change_active(uint256 _active) onlyOwner returns (bool result) {
+        active = _active;
+        return true;
+      }
+
+      // Functions with this modifier can only be executed by the owner
+    	modifier onlyOwner() {
+        if (msg.sender != owner) {
+            throw;
+        }
+        _;
+    }        	
+
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (reentrancy)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (arithmetic)?
+- Does it have patterns similar to Example 4 (reentrancy)?
+- Does it have patterns similar to Example 5 (unchecked_low_level_calls)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

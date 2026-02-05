@@ -1,0 +1,729 @@
+{
+  "metadata": {
+    "description": "40 vulnerability scenarios for LLM-SmartAudit TA (Targeted Analysis) mode",
+    "paper": "Wei et al. 2024 - LLM-SmartAudit: Advanced Smart Contract Vulnerability Detection",
+    "version": "1.0"
+  },
+  "scenarios": [
+    {
+      "id": "RE",
+      "name": "Reentrancy",
+      "dasp_category": "reentrancy",
+      "description": "Reentrancy occurs when an external contract call is allowed to make new calls to the calling contract before the first execution is complete. This can lead to unexpected state changes and fund drainage.",
+      "detection_hints": [
+        "external calls before state updates",
+        "call/send/transfer patterns followed by balance changes",
+        "recursive call possibilities"
+      ],
+      "analysis_steps": [
+        "Review the contract's code logic to identify any external calls (call, send, transfer)",
+        "Check if state variables are updated AFTER external calls",
+        "Examine if the checks-effects-interactions pattern is followed",
+        "Look for cross-function reentrancy across multiple functions"
+      ],
+      "thought_template": "To detect Reentrancy vulnerability, check:\n1. When contract makes an external call\n2. When state changes are made\n3. Order must be: checks -> state changes -> external calls"
+    },
+    {
+      "id": "IO",
+      "name": "Integer Overflow/Underflow",
+      "dasp_category": "arithmetic",
+      "description": "Integer overflow occurs when arithmetic operations exceed the maximum value a data type can hold. Underflow occurs when operations go below zero for unsigned integers.",
+      "detection_hints": [
+        "arithmetic operations without SafeMath (pre-0.8.0)",
+        "unchecked blocks in Solidity 0.8+",
+        "multiplication/addition without bounds checking"
+      ],
+      "analysis_steps": [
+        "Check Solidity version (pre-0.8.0 vulnerable by default)",
+        "Look for unchecked { } blocks in 0.8+ code",
+        "Identify arithmetic operations on user-controlled values",
+        "Check for proper bounds validation before operations"
+      ],
+      "thought_template": "To detect Integer Overflow/Underflow:\n1. Check Solidity version\n2. Look for unchecked arithmetic\n3. Trace user input to arithmetic operations"
+    },
+    {
+      "id": "USE",
+      "name": "Unchecked Send/Call Return Value",
+      "dasp_category": "unchecked_low_level_calls",
+      "description": "Low-level calls (call, send, delegatecall) return a boolean indicating success or failure. Failing to check this return value can lead to silent failures.",
+      "detection_hints": [
+        "call() without return value check",
+        "send() without handling false return",
+        "transfer() failures not properly handled"
+      ],
+      "analysis_steps": [
+        "Find all low-level calls (call, send, delegatecall)",
+        "Check if return values are captured and validated",
+        "Verify proper error handling for failed calls",
+        "Look for state changes that assume successful calls"
+      ],
+      "thought_template": "To detect Unchecked Call Returns:\n1. Find all call/send/delegatecall\n2. Check if (bool success, ) = ... pattern used\n3. Verify require(success) or revert on failure"
+    },
+    {
+      "id": "UD",
+      "name": "Unsafe Delegatecall",
+      "dasp_category": "unchecked_low_level_calls",
+      "description": "Delegatecall executes code in the context of the calling contract. If the target address is user-controlled, attackers can execute arbitrary code with the contract's storage.",
+      "detection_hints": [
+        "delegatecall to user-controlled address",
+        "proxy patterns without proper validation",
+        "library calls with external addresses"
+      ],
+      "analysis_steps": [
+        "Find all delegatecall operations",
+        "Check if target address is hardcoded or validated",
+        "Verify proxy patterns have proper access control",
+        "Ensure storage layout compatibility in proxies"
+      ],
+      "thought_template": "To detect Unsafe Delegatecall:\n1. Find delegatecall usage\n2. Check if target address is controllable\n3. Verify access control on upgrade functions"
+    },
+    {
+      "id": "TOD",
+      "name": "Transaction Order Dependence",
+      "dasp_category": "front_running",
+      "description": "TOD occurs when a contract's behavior depends on the order of transactions. Attackers monitoring the mempool can front-run transactions for profit.",
+      "detection_hints": [
+        "price-dependent operations",
+        "approval patterns vulnerable to front-running",
+        "state reads followed by value transfers"
+      ],
+      "analysis_steps": [
+        "Identify operations dependent on transaction ordering",
+        "Check for approve() race conditions",
+        "Look for price oracle dependencies",
+        "Examine if commit-reveal patterns should be used"
+      ],
+      "thought_template": "To detect TOD/Front-Running:\n1. Find price-dependent logic\n2. Check approve() patterns\n3. Look for profitable reordering opportunities"
+    },
+    {
+      "id": "TM",
+      "name": "Time Manipulation",
+      "dasp_category": "time_manipulation",
+      "description": "Miners can manipulate block.timestamp within certain bounds. Contracts relying on precise timestamps for critical logic are vulnerable.",
+      "detection_hints": [
+        "block.timestamp in conditionals",
+        "time-based unlocking mechanisms",
+        "randomness using timestamps"
+      ],
+      "analysis_steps": [
+        "Find all uses of block.timestamp or now",
+        "Check if timestamp is used for critical decisions",
+        "Verify tolerance for timestamp manipulation (~15 seconds)",
+        "Look for time-based access control bypass opportunities"
+      ],
+      "thought_template": "To detect Time Manipulation:\n1. Find block.timestamp usage\n2. Check if manipulation could benefit attacker\n3. Verify time-critical operations have tolerance"
+    },
+    {
+      "id": "RP",
+      "name": "Randomness Prediction",
+      "dasp_category": "bad_randomness",
+      "description": "On-chain randomness using block variables is predictable. Miners or observers can predict or influence 'random' outcomes.",
+      "detection_hints": [
+        "blockhash for randomness",
+        "block.timestamp in random calculations",
+        "predictable seed generation"
+      ],
+      "analysis_steps": [
+        "Find random number generation logic",
+        "Check sources of randomness (block.*, msg.*)",
+        "Verify if Chainlink VRF or similar is used",
+        "Assess impact of predictable randomness"
+      ],
+      "thought_template": "To detect Bad Randomness:\n1. Find random generation\n2. Check if block variables used\n3. Verify external oracle usage for true randomness"
+    },
+    {
+      "id": "TX",
+      "name": "Authorization via tx.origin",
+      "dasp_category": "access_control",
+      "description": "Using tx.origin for authorization allows phishing attacks where a malicious contract tricks users into executing transactions that pass the tx.origin check.",
+      "detection_hints": [
+        "tx.origin in require statements",
+        "tx.origin == owner patterns",
+        "authorization checks using tx.origin"
+      ],
+      "analysis_steps": [
+        "Find all uses of tx.origin",
+        "Check if used for access control",
+        "Verify if msg.sender should be used instead",
+        "Assess phishing attack vectors"
+      ],
+      "thought_template": "To detect tx.origin issues:\n1. Find tx.origin usage\n2. Check if used for authorization\n3. Recommend msg.sender replacement"
+    },
+    {
+      "id": "USU",
+      "name": "Unsafe Selfdestruct",
+      "dasp_category": "denial_of_service",
+      "description": "The selfdestruct function permanently destroys a contract. If callable by attackers or without proper access control, it can brick the contract and steal funds.",
+      "detection_hints": [
+        "selfdestruct without access control",
+        "suicide() (deprecated) usage",
+        "destructible by non-owners"
+      ],
+      "analysis_steps": [
+        "Find selfdestruct or suicide calls",
+        "Check access control on destruction",
+        "Verify if destruction is intentionally possible",
+        "Assess fund recovery on destruction"
+      ],
+      "thought_template": "To detect Unsafe Selfdestruct:\n1. Find selfdestruct calls\n2. Check who can trigger it\n3. Verify funds go to intended recipient"
+    },
+    {
+      "id": "GL",
+      "name": "Gas Limitation",
+      "dasp_category": "denial_of_service",
+      "description": "Operations that consume unbounded gas can fail or be manipulated. Loops over dynamic arrays or recursive calls can exceed block gas limits.",
+      "detection_hints": [
+        "unbounded loops over arrays",
+        "gas-dependent external calls",
+        "push operations in loops"
+      ],
+      "analysis_steps": [
+        "Find loops over dynamic data structures",
+        "Check for unbounded iterations",
+        "Verify gas limits on external calls",
+        "Assess DoS via gas exhaustion vectors"
+      ],
+      "thought_template": "To detect Gas Limitation issues:\n1. Find loops over dynamic arrays\n2. Check if iteration count is bounded\n3. Verify no DoS via gas exhaustion"
+    },
+    {
+      "id": "CR",
+      "name": "Centralization Risk",
+      "dasp_category": "access_control",
+      "description": "Contracts with single points of control or privileged roles can be exploited if the owner key is compromised, leading to complete loss of funds or functionality.",
+      "detection_hints": [
+        "onlyOwner modifiers on critical functions",
+        "single admin key for all operations",
+        "no multi-sig or timelock protections"
+      ],
+      "analysis_steps": [
+        "Identify all privileged functions",
+        "Check for multi-signature requirements",
+        "Look for timelocks on sensitive operations",
+        "Assess single point of failure risks"
+      ],
+      "thought_template": "To detect Centralization Risk:\n1. Find onlyOwner/admin functions\n2. Check for multi-sig requirements\n3. Verify timelocks exist for critical operations"
+    },
+    {
+      "id": "ZA",
+      "name": "Missing Zero Address Check",
+      "dasp_category": "access_control",
+      "description": "Functions that set critical addresses (owner, recipients) without checking for zero address can permanently brick the contract or lock funds.",
+      "detection_hints": [
+        "address assignments without != address(0)",
+        "constructor setting owner without validation",
+        "token transfer to unchecked addresses"
+      ],
+      "analysis_steps": [
+        "Find all address parameter assignments",
+        "Check for require(addr != address(0)) validation",
+        "Verify critical address setters have zero checks",
+        "Assess impact of zero address assignment"
+      ],
+      "thought_template": "To detect Missing Zero Address Check:\n1. Find address assignments\n2. Check for address(0) validation\n3. Assess impact if zero address is set"
+    },
+    {
+      "id": "FL",
+      "name": "Flash Loan Attack",
+      "dasp_category": "other",
+      "description": "Flash loans allow borrowing large amounts without collateral within a single transaction. Contracts relying on spot prices or balances can be manipulated.",
+      "detection_hints": [
+        "price calculations from AMM pools",
+        "balance checks for authorization",
+        "single-transaction price dependencies"
+      ],
+      "analysis_steps": [
+        "Identify price-dependent logic",
+        "Check if prices come from manipulable sources",
+        "Look for balance-based access control",
+        "Verify TWAP oracles or flash-loan resistant patterns"
+      ],
+      "thought_template": "To detect Flash Loan vulnerabilities:\n1. Find price/balance dependencies\n2. Check if prices are from single source\n3. Verify flash-loan resistant oracles used"
+    },
+    {
+      "id": "PO",
+      "name": "Price Oracle Manipulation",
+      "dasp_category": "other",
+      "description": "Contracts relying on easily manipulable price oracles (like single DEX spot prices) can be exploited to drain funds or manipulate protocol behavior.",
+      "detection_hints": [
+        "getReserves() for price calculation",
+        "single-source price feeds",
+        "no TWAP or Chainlink integration"
+      ],
+      "analysis_steps": [
+        "Find all price oracle usage",
+        "Check if prices from single DEX",
+        "Verify TWAP or Chainlink integration",
+        "Assess manipulation impact"
+      ],
+      "thought_template": "To detect Price Oracle Manipulation:\n1. Find price sources\n2. Check if easily manipulable\n3. Recommend TWAP or Chainlink oracles"
+    },
+    {
+      "id": "SR",
+      "name": "Signature Replay",
+      "dasp_category": "access_control",
+      "description": "Signed messages can be replayed across transactions, chains, or contracts if not properly protected with nonces, deadlines, and domain separators.",
+      "detection_hints": [
+        "ecrecover without nonce tracking",
+        "missing chain ID in signature",
+        "no deadline for signed operations"
+      ],
+      "analysis_steps": [
+        "Find all signature verification logic",
+        "Check for nonce tracking to prevent replay",
+        "Verify chain ID included in domain separator",
+        "Look for deadline/expiration checks"
+      ],
+      "thought_template": "To detect Signature Replay:\n1. Find ecrecover usage\n2. Check for nonce tracking\n3. Verify EIP-712 domain separator with chainId"
+    },
+    {
+      "id": "SM",
+      "name": "Signature Malleability",
+      "dasp_category": "access_control",
+      "description": "ECDSA signatures have malleability where valid signatures can be modified to create different but still valid signatures, potentially bypassing signature uniqueness checks.",
+      "detection_hints": [
+        "direct ecrecover usage",
+        "signature-based uniqueness checks",
+        "no s-value range check"
+      ],
+      "analysis_steps": [
+        "Find ecrecover or signature verification",
+        "Check if using OpenZeppelin ECDSA library",
+        "Verify s-value is in lower half",
+        "Look for signature-based uniqueness assumptions"
+      ],
+      "thought_template": "To detect Signature Malleability:\n1. Find signature verification\n2. Check if s-value validated\n3. Recommend OpenZeppelin ECDSA library"
+    },
+    {
+      "id": "MAC",
+      "name": "Missing Access Control",
+      "dasp_category": "access_control",
+      "description": "Functions that modify critical state without proper access control modifiers can be called by anyone, leading to unauthorized changes.",
+      "detection_hints": [
+        "public/external state-changing functions",
+        "missing onlyOwner or similar modifiers",
+        "initialization functions callable by anyone"
+      ],
+      "analysis_steps": [
+        "Find all state-changing functions",
+        "Check for access control modifiers",
+        "Verify initialization is properly protected",
+        "Assess impact of unauthorized calls"
+      ],
+      "thought_template": "To detect Missing Access Control:\n1. Find state-changing functions\n2. Check for access modifiers\n3. Verify who can call critical functions"
+    },
+    {
+      "id": "IIO",
+      "name": "Incorrect Inheritance Order",
+      "dasp_category": "other",
+      "description": "Solidity uses C3 linearization for multiple inheritance. Incorrect ordering can lead to unexpected function resolution and state variable shadowing.",
+      "detection_hints": [
+        "multiple inheritance with overlapping functions",
+        "diamond inheritance patterns",
+        "override conflicts"
+      ],
+      "analysis_steps": [
+        "Map inheritance hierarchy",
+        "Check for function override conflicts",
+        "Verify C3 linearization order is intended",
+        "Look for shadowed state variables"
+      ],
+      "thought_template": "To detect Incorrect Inheritance Order:\n1. Map contract inheritance\n2. Check for override conflicts\n3. Verify most-derived contract is last in list"
+    },
+    {
+      "id": "SV",
+      "name": "Shadowing Variables",
+      "dasp_category": "other",
+      "description": "Local variables or inherited state variables with the same name can shadow each other, leading to unexpected behavior and bugs.",
+      "detection_hints": [
+        "local variables with same name as state",
+        "inherited variables with same names",
+        "function parameters shadowing state"
+      ],
+      "analysis_steps": [
+        "Find variables with duplicate names",
+        "Check local vs state variable conflicts",
+        "Verify inherited variable shadowing",
+        "Assess impact of shadowing"
+      ],
+      "thought_template": "To detect Shadowing Variables:\n1. Find duplicate variable names\n2. Check local vs state conflicts\n3. Verify inheritance doesn't create shadows"
+    },
+    {
+      "id": "SC",
+      "name": "Storage Collision",
+      "dasp_category": "other",
+      "description": "In proxy patterns, storage slots can collide between proxy and implementation contracts, leading to corruption of critical state.",
+      "detection_hints": [
+        "proxy patterns without EIP-1967",
+        "delegatecall with different storage layouts",
+        "upgradeable contracts without storage gaps"
+      ],
+      "analysis_steps": [
+        "Identify proxy pattern usage",
+        "Check for EIP-1967 compliance",
+        "Verify storage layout compatibility",
+        "Look for storage gaps in upgradeable contracts"
+      ],
+      "thought_template": "To detect Storage Collision:\n1. Find proxy/delegatecall usage\n2. Check storage layout compatibility\n3. Verify EIP-1967 slots used"
+    },
+    {
+      "id": "USP",
+      "name": "Uninitialized Storage Pointer",
+      "dasp_category": "other",
+      "description": "In older Solidity versions, uninitialized local storage variables point to slot 0 by default, potentially overwriting critical state.",
+      "detection_hints": [
+        "local struct without explicit storage/memory",
+        "Solidity version < 0.5.0",
+        "unassigned storage references"
+      ],
+      "analysis_steps": [
+        "Check Solidity version",
+        "Find local struct/array declarations",
+        "Verify explicit storage/memory keywords",
+        "Look for uninitialized storage pointers"
+      ],
+      "thought_template": "To detect Uninitialized Storage Pointer:\n1. Check Solidity version\n2. Find local complex type declarations\n3. Verify explicit storage/memory location"
+    },
+    {
+      "id": "FP",
+      "name": "Floating Pragma",
+      "dasp_category": "other",
+      "description": "Using floating pragma (^0.8.0) instead of locked version can lead to contracts being compiled with unintended compiler versions with different behaviors.",
+      "detection_hints": [
+        "pragma solidity ^x.x.x",
+        "pragma solidity >=x.x.x",
+        "no locked pragma version"
+      ],
+      "analysis_steps": [
+        "Check pragma statement",
+        "Verify if version is locked",
+        "Assess risk of version drift",
+        "Recommend specific version locking"
+      ],
+      "thought_template": "To detect Floating Pragma:\n1. Check pragma statement\n2. Look for ^ or >= operators\n3. Recommend locked version"
+    },
+    {
+      "id": "OCV",
+      "name": "Outdated Compiler Version",
+      "dasp_category": "other",
+      "description": "Using outdated Solidity versions may expose contracts to known compiler bugs and security issues that have been fixed in newer versions.",
+      "detection_hints": [
+        "pragma solidity < 0.8.0",
+        "known vulnerable compiler versions",
+        "missing security features from newer versions"
+      ],
+      "analysis_steps": [
+        "Check compiler version",
+        "Compare against known buggy versions",
+        "Verify critical security features available",
+        "Recommend version upgrade"
+      ],
+      "thought_template": "To detect Outdated Compiler:\n1. Check Solidity version\n2. Compare against known bugs\n3. Recommend 0.8.x or later"
+    },
+    {
+      "id": "ME",
+      "name": "Missing Events",
+      "dasp_category": "other",
+      "description": "Critical state changes without events make off-chain monitoring and indexing impossible, reducing transparency and auditability.",
+      "detection_hints": [
+        "state changes without emit",
+        "ownership transfers without events",
+        "fund movements without logging"
+      ],
+      "analysis_steps": [
+        "Find all state-changing operations",
+        "Check for corresponding event emissions",
+        "Verify critical operations are logged",
+        "Assess monitoring/indexing impact"
+      ],
+      "thought_template": "To detect Missing Events:\n1. Find state-changing functions\n2. Check for emit statements\n3. Verify critical operations logged"
+    },
+    {
+      "id": "MIV",
+      "name": "Missing Input Validation",
+      "dasp_category": "other",
+      "description": "Functions that accept external input without proper validation can receive malicious or unexpected values leading to unintended behavior.",
+      "detection_hints": [
+        "external functions without require checks",
+        "array index access without bounds check",
+        "division without zero check"
+      ],
+      "analysis_steps": [
+        "Find all external/public function inputs",
+        "Check for input validation (require/revert)",
+        "Verify array bounds checking",
+        "Look for division by zero possibilities"
+      ],
+      "thought_template": "To detect Missing Input Validation:\n1. Find external function parameters\n2. Check for validation logic\n3. Verify bounds and zero checks"
+    },
+    {
+      "id": "HA",
+      "name": "Hardcoded Addresses",
+      "dasp_category": "other",
+      "description": "Hardcoded addresses reduce flexibility and can cause issues when deploying to different networks or if referenced contracts are upgraded.",
+      "detection_hints": [
+        "literal Ethereum addresses in code",
+        "non-configurable external contract addresses",
+        "mainnet addresses in test deployments"
+      ],
+      "analysis_steps": [
+        "Find all literal addresses in code",
+        "Check if addresses are configurable",
+        "Verify network-specific addresses handled",
+        "Assess upgrade/migration impact"
+      ],
+      "thought_template": "To detect Hardcoded Addresses:\n1. Find literal addresses\n2. Check if configurable\n3. Verify network compatibility"
+    },
+    {
+      "id": "IEH",
+      "name": "Improper Error Handling",
+      "dasp_category": "other",
+      "description": "Improper error handling can hide failures, allow continued execution after errors, or provide attackers with information about contract internals.",
+      "detection_hints": [
+        "empty catch blocks",
+        "swallowed exceptions",
+        "generic error messages"
+      ],
+      "analysis_steps": [
+        "Find try/catch blocks",
+        "Check for empty or generic catch handlers",
+        "Verify errors are properly propagated",
+        "Assess information leakage in error messages"
+      ],
+      "thought_template": "To detect Improper Error Handling:\n1. Find try/catch blocks\n2. Check for empty catch handlers\n3. Verify errors properly handled"
+    },
+    {
+      "id": "MRG",
+      "name": "Missing Reentrancy Guard",
+      "dasp_category": "reentrancy",
+      "description": "Functions making external calls without reentrancy guards (like OpenZeppelin's nonReentrant) are vulnerable to reentrancy attacks even with correct patterns.",
+      "detection_hints": [
+        "external calls without nonReentrant",
+        "cross-function state sharing",
+        "callback patterns without guards"
+      ],
+      "analysis_steps": [
+        "Find functions with external calls",
+        "Check for nonReentrant modifier",
+        "Verify reentrancy guard implementation",
+        "Look for cross-function reentrancy paths"
+      ],
+      "thought_template": "To detect Missing Reentrancy Guard:\n1. Find external calls\n2. Check for nonReentrant modifier\n3. Verify OpenZeppelin ReentrancyGuard used"
+    },
+    {
+      "id": "ARC",
+      "name": "ERC20 approve() Race Condition",
+      "dasp_category": "front_running",
+      "description": "The standard ERC20 approve() function has a race condition where spenders can front-run approval changes to spend both old and new allowances.",
+      "detection_hints": [
+        "approve() without increaseAllowance/decreaseAllowance",
+        "direct allowance overwrites",
+        "no approve-to-zero pattern"
+      ],
+      "analysis_steps": [
+        "Check ERC20 implementation",
+        "Look for approve() usage patterns",
+        "Verify increaseAllowance/decreaseAllowance available",
+        "Check for approve-to-zero requirement"
+      ],
+      "thought_template": "To detect approve() Race Condition:\n1. Check approve implementation\n2. Look for direct allowance changes\n3. Recommend increaseAllowance/decreaseAllowance"
+    },
+    {
+      "id": "LTOT",
+      "name": "Lack of Two-Step Ownership Transfer",
+      "dasp_category": "access_control",
+      "description": "Direct ownership transfers without confirmation can lead to permanent loss of control if transferred to wrong address.",
+      "detection_hints": [
+        "transferOwnership without pending owner",
+        "single-step privilege transfers",
+        "no acceptance confirmation"
+      ],
+      "analysis_steps": [
+        "Find ownership transfer functions",
+        "Check for two-step pattern",
+        "Verify pending owner mechanism",
+        "Assess irreversible transfer risks"
+      ],
+      "thought_template": "To detect Missing Two-Step Transfer:\n1. Find ownership transfer\n2. Check for pending owner\n3. Recommend Ownable2Step pattern"
+    },
+    {
+      "id": "UTA",
+      "name": "Unlimited Token Approval",
+      "dasp_category": "access_control",
+      "description": "Approving type(uint256).max to spenders gives unlimited access to user tokens, which can be exploited if the approved contract is compromised.",
+      "detection_hints": [
+        "approve(type(uint256).max)",
+        "infinite approval patterns",
+        "no approval revocation mechanism"
+      ],
+      "analysis_steps": [
+        "Find approval patterns",
+        "Check for unlimited approvals",
+        "Verify approval amounts are bounded",
+        "Assess risk of compromised spenders"
+      ],
+      "thought_template": "To detect Unlimited Token Approval:\n1. Find approve calls\n2. Check for max uint approvals\n3. Recommend exact amount approvals"
+    },
+    {
+      "id": "IIV",
+      "name": "Insufficient Input Validation",
+      "dasp_category": "other",
+      "description": "Partial input validation that misses edge cases or boundary conditions can still allow malicious inputs to cause unintended behavior.",
+      "detection_hints": [
+        "incomplete bounds checking",
+        "missing edge case handling",
+        "type conversion without validation"
+      ],
+      "analysis_steps": [
+        "Review all validation logic",
+        "Check for edge cases (0, max, overflow)",
+        "Verify type conversion safety",
+        "Test boundary conditions"
+      ],
+      "thought_template": "To detect Insufficient Validation:\n1. Review validation logic\n2. Check edge cases\n3. Verify all boundaries covered"
+    },
+    {
+      "id": "IPW",
+      "name": "Improper Partial Withdrawals",
+      "dasp_category": "other",
+      "description": "Withdrawal functions that don't properly handle partial withdrawals can leave funds stranded or allow withdrawal of more than intended.",
+      "detection_hints": [
+        "withdrawal without balance check",
+        "share calculation rounding errors",
+        "incomplete fund accounting"
+      ],
+      "analysis_steps": [
+        "Find withdrawal functions",
+        "Check balance/share calculations",
+        "Verify rounding handling (round down for withdrawals)",
+        "Test partial withdrawal scenarios"
+      ],
+      "thought_template": "To detect Improper Partial Withdrawals:\n1. Find withdrawal logic\n2. Check share calculations\n3. Verify rounding favors protocol"
+    },
+    {
+      "id": "UCE",
+      "name": "Unchecked External Calls",
+      "dasp_category": "unchecked_low_level_calls",
+      "description": "External calls to other contracts that fail silently without proper error handling can leave the contract in an inconsistent state.",
+      "detection_hints": [
+        "external calls without try/catch",
+        "interface calls assuming success",
+        "no revert on failed external calls"
+      ],
+      "analysis_steps": [
+        "Find all external contract calls",
+        "Check for try/catch or return value handling",
+        "Verify state consistency on failure",
+        "Assess impact of silent failures"
+      ],
+      "thought_template": "To detect Unchecked External Calls:\n1. Find external calls\n2. Check for error handling\n3. Verify state consistency on failure"
+    },
+    {
+      "id": "MSP",
+      "name": "Missing Slippage Protection",
+      "dasp_category": "front_running",
+      "description": "Swap or trade operations without slippage parameters allow MEV bots and front-runners to sandwich attack transactions for profit.",
+      "detection_hints": [
+        "swaps with amountOutMin = 0",
+        "missing deadline parameter",
+        "no slippage tolerance specification"
+      ],
+      "analysis_steps": [
+        "Find swap/trade operations",
+        "Check for amountOutMin parameters",
+        "Verify deadline protections",
+        "Assess sandwich attack exposure"
+      ],
+      "thought_template": "To detect Missing Slippage Protection:\n1. Find swap operations\n2. Check for amountOutMin\n3. Verify deadline parameter exists"
+    },
+    {
+      "id": "SAV",
+      "name": "Sandwich Attack Vulnerability",
+      "dasp_category": "front_running",
+      "description": "Transactions that can be profitably sandwiched (front-run and back-run) due to predictable price impact are vulnerable to MEV extraction.",
+      "detection_hints": [
+        "large swaps without protection",
+        "predictable price impact operations",
+        "public pending transaction visibility"
+      ],
+      "analysis_steps": [
+        "Identify price-impacting operations",
+        "Check for MEV protection mechanisms",
+        "Verify private mempool or Flashbots usage",
+        "Assess profitability of sandwich attacks"
+      ],
+      "thought_template": "To detect Sandwich Vulnerability:\n1. Find price-impacting operations\n2. Check for MEV protection\n3. Verify slippage limits adequate"
+    },
+    {
+      "id": "IFC",
+      "name": "Incorrect Fee Calculation",
+      "dasp_category": "arithmetic",
+      "description": "Fee calculations with rounding errors, incorrect order of operations, or precision loss can result in fees that are too high, too low, or exploitable.",
+      "detection_hints": [
+        "division before multiplication",
+        "percentage calculations with truncation",
+        "fee bypass through small amounts"
+      ],
+      "analysis_steps": [
+        "Find all fee calculation logic",
+        "Check order of operations (multiply before divide)",
+        "Verify precision handling",
+        "Test with edge case amounts"
+      ],
+      "thought_template": "To detect Incorrect Fee Calculation:\n1. Find fee calculations\n2. Check multiply before divide\n3. Verify rounding direction"
+    },
+    {
+      "id": "SPD",
+      "name": "Stale Price Data",
+      "dasp_category": "other",
+      "description": "Using price data without checking freshness can lead to decisions based on outdated information, especially during network congestion or oracle downtime.",
+      "detection_hints": [
+        "Chainlink without staleness check",
+        "no updatedAt validation",
+        "missing heartbeat verification"
+      ],
+      "analysis_steps": [
+        "Find oracle price usage",
+        "Check for staleness validation",
+        "Verify heartbeat/freshness checks",
+        "Assess impact of stale prices"
+      ],
+      "thought_template": "To detect Stale Price Data:\n1. Find oracle usage\n2. Check for timestamp validation\n3. Verify staleness threshold appropriate"
+    },
+    {
+      "id": "TTH",
+      "name": "Token Transfer Hooks",
+      "dasp_category": "reentrancy",
+      "description": "ERC777, ERC1155, and some ERC721 implementations have transfer hooks that can be exploited for reentrancy or to manipulate token balances during transfers.",
+      "detection_hints": [
+        "ERC777 tokensReceived hooks",
+        "ERC1155 onERC1155Received callbacks",
+        "ERC721 onERC721Received callbacks"
+      ],
+      "analysis_steps": [
+        "Identify token types used",
+        "Check for callback patterns",
+        "Verify reentrancy guards around token operations",
+        "Assess hook exploitation potential"
+      ],
+      "thought_template": "To detect Token Transfer Hook issues:\n1. Identify token standards\n2. Check for callback hooks\n3. Verify reentrancy protection"
+    },
+    {
+      "id": "XCR",
+      "name": "Cross-Contract Reentrancy",
+      "dasp_category": "reentrancy",
+      "description": "Reentrancy through multiple contracts in the same protocol, where the attacker reenters through a different contract that shares state.",
+      "detection_hints": [
+        "shared state across contracts",
+        "external calls between protocol contracts",
+        "global reentrancy locks needed"
+      ],
+      "analysis_steps": [
+        "Map contract interactions within protocol",
+        "Identify shared state variables",
+        "Check for cross-contract reentrancy paths",
+        "Verify global reentrancy guards"
+      ],
+      "thought_template": "To detect Cross-Contract Reentrancy:\n1. Map contract interactions\n2. Find shared state\n3. Check for protocol-wide reentrancy guards"
+    }
+  ]
+}

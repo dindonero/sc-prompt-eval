@@ -1,0 +1,946 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract owned {
+    address public owner;
+
+    function owned() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
+}
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) external; }
+
+contract TokenERC20 {
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 18;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    
+    // This generates a public event on the blockchain that will notify clients
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    function TokenERC20(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        // Subtract from the sender
+        balanceOf[_from] -= _value;
+        // Add the same to the recipient
+        balanceOf[_to] += _value;
+        Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should never fail
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
+    }
+
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     *
+     *
+     */
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        _transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     *
+     *
+     *
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);     // Check allowance
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
+    }
+
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     *
+     *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, final version of the explanation:
+
+1) What’s wrong (the dangerous pattern)  
+– The function approveAndCall first updates its own state by calling approve(_spender, _value), then immediately does an unchecked, external call:  
+   tokenRecipient(_spender).receiveApproval(...)  
+– Because we don’t guard that call with any try/catch or revert‐protection, any failure inside receiveApproval (a revert, an out‐of‐gas, an infinite loop, etc.) will bubble out and roll back the entire transaction—including the state change we just made to allowance.
+
+2) How an attacker exploits it for DoS  
+– The attacker deploys a “spender” contract whose receiveApproval always reverts (or consumes all provided gas).  
+– Every time any token‐holder calls approveAndCall(villain, …), the villain’s receiveApproval throws, causing the whole approveAndCall to revert.  
+– Because the revert also undoes the allowance mapping update, no one can ever successfully use approveAndCall to grant allowances to that address. The attacker has effectively locked every token‐holder out of that function—pure Denial-of-Service.
+
+3) Why this wouldn’t happen (or is much harder) with proper Checks-Effects-Interactions  
+– Best practice is to perform *all* external calls before you modify your own state, or at least isolate them so a failure can’t revert your state change.  
+– For example you could  
+  • call receiveApproval first (catching failures so they don’t bubble out), then  
+  • update allowance in a separate step, or  
+  • wrap the external call in a low-level call and handle its boolean return.  
+– That way, even if the external code misbehaves, your internal state stays consistent and you don’t open yourself up to a permanent block.
+
+Evaluation of the original explanation:  
+• Accurate? Yes—it correctly pinpoints the unguarded external call in approveAndCall as the root cause.  
+• Clear? Yes—it shows step by step how a malicious spender triggers a revert that undoes the allowance update.  
+• Complete? Yes—it specifies the conditions (external call after state write, no error handling) and the attack outcome (permanent DoS of that function).
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 2: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract owned {
+    address public owner;
+
+    function owned() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
+}
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) external; }
+
+contract TokenERC20 {
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 18;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    
+    // This generates a public event on the blockchain that will notify clients
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    function TokenERC20(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        // Subtract from the sender
+        balanceOf[_from] -= _value;
+        // Add the same to the recipient
+        balanceOf[_to] += _value;
+        emit Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should never fail
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
+    }
+
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     *
+     *
+     */
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        _transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     *
+     *
+     *
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);     // Check allowance
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
+    }
+
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     *
+     *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes—your breakdown is spot-on. Below is a concise, refined explanation that:
+
+• Identifies the vulnerable code  
+• Explains exactly why zero-value calls dead-stop the token  
+• Shows how an attacker exploits it  
+• Lists the conditions that make the DoS possible
+
+1. Vulnerable code pattern  
+   In the internal transfer function the overflow check is written as:  
+     require(balanceOf[_to] + _value > balanceOf[_to]);  
+   Because “>” is a strict comparison, any call with `_value == 0` will revert here.  
+
+2. Why blocking zero-value transfers is a DoS  
+   The ERC-20 standard explicitly allows transferring zero tokens. Zero-value transfers are commonly used to:  
+   - Probe whether an address or contract supports a token  
+   - Emit a harmless Transfer event for off-chain indexers  
+   - Test approvals or permissions (e.g. calling `transferFrom(...,0)` to check allowance)  
+
+   By reverting on `_value == 0`, this token implementation breaks any higher-level logic that relies on zero-value calls as “ping” checks. Once a dApp or contract tries `transfer(…,0)`, the whole transaction bails out.
+
+3. Attacker’s exploit  
+   • No special privileges are needed. Anyone calls `transfer(...)` or `transferFrom(...)` with `_value = 0`.  
+   • The require-statement rejects it and reverts.  
+   • Any integration—exchanges, wallets, permission-check contracts—that does a zero-value “ping” will now revert, denying service to all users.
+
+4. Conditions enabling the DoS  
+   – The overflow check uses `>` instead of `>=`.  
+   – There is no explicit exception for `_value == 0`.  
+   – ERC-20 consumers routinely perform zero-value transfers as safe, gas-cheap checks.  
+
+5. Mitigation  
+   Replace the strict check with a non-strict one:  
+     require(balanceOf[_to] + _value >= balanceOf[_to]);  
+   Or use a battle-tested SafeMath library that correctly handles zero.  
+
+In summary, a single “>` vs. `>=`” typo turns innocuous zero-value transfers into a universal kill-switch, allowing anyone—malicious or not—to mount a denial-of-service against the token’s entire ecosystem.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 3: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract owned {
+    address public owner;
+
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
+}
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) external; }
+
+contract TokenERC20 {
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 18;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    
+    // This generates a public event on the blockchain that will notify clients
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    constructor(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        // Subtract from the sender
+        balanceOf[_from] -= _value;
+        // Add the same to the recipient
+        balanceOf[_to] += _value;
+        emit Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should never fail
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
+    }
+
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     *
+     *
+     */
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        _transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     *
+     *
+     *
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);     // Check allowance
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
+    }
+
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     *
+     *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes—your write-up correctly pinpoints the bad check, clearly shows how wrapping makes it fail, and lays out exactly when an attacker can weaponize it. Below is a concise, polished explanation:
+
+1. Vulnerable Code Pattern  
+   • In the transfer helper you see:  
+     require(balanceOf[_to] + _value > balanceOf[_to]);  
+   • That line was meant to catch overflows on  
+     balanceOf[_to] += _value;  
+   • But in Solidity 0.4.x arithmetic silently wraps modulo 2^256 instead of reverting.
+
+2. Why It Breaks (and Becomes DoS)  
+   • If balanceOf[A] is, say, 2^256 − 10 and someone sends 20 tokens:  
+     – Raw sum is 2^256 + 10, which wraps to 10.  
+     – The require becomes require(10 > 2^256 − 10), which is false.  
+     – The transfer reverts.  
+   • Once A’s balance reaches that “wrap zone,” every attempt to send tokens into A will overflow and revert.  
+   • A is now a permanent “black hole”—any transfer to it (direct or via transferFrom) is blocked.
+
+3. Attack Vector & Conditions  
+   • You need the power to push an account’s balance up near 2^256 − 1:  
+     – Initial token supply can be minted large enough, or  
+     – A contract owner or approved address can funnel tokens into that account.  
+   • As soon as that balance crosses the overflow threshold, no one—neither A nor anyone else—can receive tokens there again.  
+   • If your protocol ever routes funds through A (for payroll, staking, routing bridges, etc.), it will start failing and lock funds system-wide.
+
+4. Fix  
+   • In Solidity ≥0.8.x, built-in overflow checks will auto-revert, so the bad require isn’t needed.  
+   • In earlier versions, use a battle-tested library like SafeMath and do:  
+     balanceOf[_to] = balanceOf[_to].add(_value);  
+     (SafeMath’s add reverts on overflow automatically.)  
+
+Summary  
+By relying on “require(x + y > x)” under a silent-wrap arithmetic regime, you introduce a permanent denial-of-service risk. Always use overflow-safe addition (either via SafeMath or the native checks in newer Solidity) to prevent this black-hole scenario.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 4: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract owned {
+    address public owner;
+
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
+}
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) external; }
+
+contract TokenERC20 {
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 18;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    
+    // This generates a public event on the blockchain that will notify clients
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    constructor(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        // Subtract from the sender
+        balanceOf[_from] -= _value;
+        // Add the same to the recipient
+        balanceOf[_to] += _value;
+        emit Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should never fail
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
+    }
+
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     *
+     *
+     */
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        _transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     *
+     *
+     *
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);     // Check allowance
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
+    }
+
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     *
+     *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes—your write-up correctly pinpoints the bad check, clearly shows how wrapping makes it fail, and lays out exactly when an attacker can weaponize it. Below is a concise, polished explanation:
+
+1. Vulnerable Code Pattern  
+   • In the transfer helper you see:  
+     require(balanceOf[_to] + _value > balanceOf[_to]);  
+   • That line was meant to catch overflows on  
+     balanceOf[_to] += _value;  
+   • But in Solidity 0.4.x arithmetic silently wraps modulo 2^256 instead of reverting.
+
+2. Why It Breaks (and Becomes DoS)  
+   • If balanceOf[A] is, say, 2^256 − 10 and someone sends 20 tokens:  
+     – Raw sum is 2^256 + 10, which wraps to 10.  
+     – The require becomes require(10 > 2^256 − 10), which is false.  
+     – The transfer reverts.  
+   • Once A’s balance reaches that “wrap zone,” every attempt to send tokens into A will overflow and revert.  
+   • A is now a permanent “black hole”—any transfer to it (direct or via transferFrom) is blocked.
+
+3. Attack Vector & Conditions  
+   • You need the power to push an account’s balance up near 2^256 − 1:  
+     – Initial token supply can be minted large enough, or  
+     – A contract owner or approved address can funnel tokens into that account.  
+   • As soon as that balance crosses the overflow threshold, no one—neither A nor anyone else—can receive tokens there again.  
+   • If your protocol ever routes funds through A (for payroll, staking, routing bridges, etc.), it will start failing and lock funds system-wide.
+
+4. Fix  
+   • In Solidity ≥0.8.x, built-in overflow checks will auto-revert, so the bad require isn’t needed.  
+   • In earlier versions, use a battle-tested library like SafeMath and do:  
+     balanceOf[_to] = balanceOf[_to].add(_value);  
+     (SafeMath’s add reverts on overflow automatically.)  
+
+Summary  
+By relying on “require(x + y > x)” under a silent-wrap arithmetic regime, you introduce a permanent denial-of-service risk. Always use overflow-safe addition (either via SafeMath or the native checks in newer Solidity) to prevent this black-hole scenario.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+contract owned {
+    address public owner;
+
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
+}
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) external; }
+
+contract TokenERC20 {
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 18;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    
+    // This generates a public event on the blockchain that will notify clients
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    constructor(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        // Subtract from the sender
+        balanceOf[_from] -= _value;
+        // Add the same to the recipient
+        balanceOf[_to] += _value;
+        emit Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should never fail
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
+    }
+
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     *
+     *
+     */
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        _transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     *
+     *
+     *
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);     // Check allowance
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
+    }
+
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     *
+     *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes—your write-up correctly pinpoints the bad check, clearly shows how wrapping makes it fail, and lays out exactly when an attacker can weaponize it. Below is a concise, polished explanation:
+
+1. Vulnerable Code Pattern  
+   • In the transfer helper you see:  
+     require(balanceOf[_to] + _value > balanceOf[_to]);  
+   • That line was meant to catch overflows on  
+     balanceOf[_to] += _value;  
+   • But in Solidity 0.4.x arithmetic silently wraps modulo 2^256 instead of reverting.
+
+2. Why It Breaks (and Becomes DoS)  
+   • If balanceOf[A] is, say, 2^256 − 10 and someone sends 20 tokens:  
+     – Raw sum is 2^256 + 10, which wraps to 10.  
+     – The require becomes require(10 > 2^256 − 10), which is false.  
+     – The transfer reverts.  
+   • Once A’s balance reaches that “wrap zone,” every attempt to send tokens into A will overflow and revert.  
+   • A is now a permanent “black hole”—any transfer to it (direct or via transferFrom) is blocked.
+
+3. Attack Vector & Conditions  
+   • You need the power to push an account’s balance up near 2^256 − 1:  
+     – Initial token supply can be minted large enough, or  
+     – A contract owner or approved address can funnel tokens into that account.  
+   • As soon as that balance crosses the overflow threshold, no one—neither A nor anyone else—can receive tokens there again.  
+   • If your protocol ever routes funds through A (for payroll, staking, routing bridges, etc.), it will start failing and lock funds system-wide.
+
+4. Fix  
+   • In Solidity ≥0.8.x, built-in overflow checks will auto-revert, so the bad require isn’t needed.  
+   • In earlier versions, use a battle-tested library like SafeMath and do:  
+     balanceOf[_to] = balanceOf[_to].add(_value);  
+     (SafeMath’s add reverts on overflow automatically.)  
+
+Summary  
+By relying on “require(x + y > x)” under a silent-wrap arithmetic regime, you introduce a permanent denial-of-service risk. Always use overflow-safe addition (either via SafeMath or the native checks in newer Solidity) to prevent this black-hole scenario.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: https://github.com/sigp/solidity-security-blog
+ * @author: Suhabe Bugrara
+ 
+ */
+
+//added pragma version
+pragma solidity ^0.4.22;
+
+contract FibonacciBalance {
+
+    address public fibonacciLibrary;
+    // the current fibonacci number to withdraw
+    uint public calculatedFibNumber;
+    // the starting fibonacci sequence number
+    uint public start = 3;
+    uint public withdrawalCounter;
+    // the fibonancci function selector
+    bytes4 constant fibSig = bytes4(sha3("setFibonacci(uint256)"));
+
+    // constructor - loads the contract with ether
+    constructor(address _fibonacciLibrary) public payable {
+        fibonacciLibrary = _fibonacciLibrary;
+    }
+
+    function withdraw() {
+        withdrawalCounter += 1;
+        // calculate the fibonacci number for the current withdrawal user
+        // this sets calculatedFibNumber
+        
+        require(fibonacciLibrary.delegatecall(fibSig, withdrawalCounter));
+        msg.sender.transfer(calculatedFibNumber * 1 ether);
+    }
+
+    // allow users to call fibonacci library functions
+    function() public {
+        
+        require(fibonacciLibrary.delegatecall(msg.data));
+    }
+}
+
+// library contract - calculates fibonacci-like numbers;
+contract FibonacciLib {
+    // initializing the standard fibonacci sequence;
+    uint public start;
+    uint public calculatedFibNumber;
+
+    // modify the zeroth number in the sequence
+    function setStart(uint _start) public {
+        start = _start;
+    }
+
+    function setFibonacci(uint n) public {
+        calculatedFibNumber = fibonacci(n);
+    }
+
+    function fibonacci(uint n) internal returns (uint) {
+        if (n == 0) return start;
+        else if (n == 1) return start + 1;
+        else return fibonacci(n - 1) + fibonacci(n - 2);
+    }
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (denial_of_service)?
+- Does it have patterns similar to Example 2 (denial_of_service)?
+- Does it have patterns similar to Example 3 (denial_of_service)?
+- Does it have patterns similar to Example 4 (denial_of_service)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

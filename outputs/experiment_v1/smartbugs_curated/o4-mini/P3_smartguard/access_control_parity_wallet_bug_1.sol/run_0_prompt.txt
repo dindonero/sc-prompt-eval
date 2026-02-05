@@ -1,0 +1,1293 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+// Original author: Cintix
+// Modified by: Moonlambos, yakois
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+  function transfer(address _to, uint256 _value) returns (bool success);
+  function balanceOf(address _owner) constant returns (uint256 balance);
+}
+
+contract RequestSale {
+  // Store the amount of ETH deposited by each account.
+  mapping (address => uint256) public balances;
+  // Track whether the contract has bought the tokens yet.
+  bool public bought_tokens;
+  // Record ETH value of tokens currently held by contract.
+  uint256 public contract_eth_value;
+  // Maximum amount of user ETH contract will accept.
+  uint256 public eth_cap = 500 ether;
+  // The minimum amount of ETH that must be deposited before the buy-in can be performed.
+  uint256 constant public min_required_amount = 60 ether;
+  // The owner's address.
+  address public owner;
+  // The crowdsale address. Can be verified at: https://request.network/#/presale.
+  address public sale = 0xa579E31b930796e3Df50A56829cF82Db98b6F4B3;
+  
+  //Constructor. Sets the sender as the owner of the contract.
+  function RequestSale() {
+    owner = msg.sender;
+  }
+  
+  // Allows any user to withdraw his tokens.
+  // Token's ERC20 address as argument as it is unknow at the time of deployement.
+  function perform_withdrawal(address tokenAddress) {
+    // Tokens must be bought
+    require(bought_tokens);
+    // Retrieve current token balance of contract
+    ERC20 token = ERC20(tokenAddress);
+    uint256 contract_token_balance = token.balanceOf(address(this));
+    // Disallow token withdrawals if there are no tokens to withdraw.
+    require(contract_token_balance != 0);
+    // Store the user's token balance in a temporary variable.
+    uint256 tokens_to_withdraw = (balances[msg.sender] * contract_token_balance) / contract_eth_value;
+    // Update the value of tokens currently held by the contract.
+    contract_eth_value -= balances[msg.sender];
+    // Update the user's balance prior to sending to prevent recursive call.
+    balances[msg.sender] = 0;
+    // Send the funds.  Throws on failure to prevent loss of funds.
+    require(token.transfer(msg.sender, tokens_to_withdraw));
+  }
+  
+  // Allows any caller to get his eth refunded.
+  function refund_me() {
+    // Store the user's balance prior to withdrawal in a temporary variable.
+    uint256 eth_to_withdraw = balances[msg.sender];
+    // Update the user's balance prior to sending ETH to prevent recursive call.
+    balances[msg.sender] = 0;
+    // Return the user's funds.  Throws on failure to prevent loss of funds.
+    msg.sender.transfer(eth_to_withdraw);
+  }
+  
+  // Buy the tokens. Sends ETH to the presale wallet and records the ETH amount held in the contract.
+  function buy_the_tokens() {
+    // Only allow the owner to perform the buy in.
+    require(msg.sender == owner);
+    // Short circuit to save gas if the contract has already bought tokens.
+    require(!bought_tokens);
+    // The pre-sale address has to be set.
+    require(sale != 0x0);
+    // Throw if the contract balance is less than the minimum required amount.
+    require(this.balance >= min_required_amount);
+    // Record that the contract has bought the tokens.
+    bought_tokens = true;
+    // Record the amount of ETH sent as the contract's current value.
+    contract_eth_value = this.balance;
+    // Transfer all the funds to the crowdsale address.
+    require(sale.call.value(contract_eth_value)());
+  }
+
+  function upgrade_cap() {
+    // Only the owner can raise the cap.
+    require(msg.sender == owner);
+    // Raise the cap.
+    eth_cap = 1000 ether;
+    
+  }
+  
+  // Default function.  Called when a user sends ETH to the contract.
+  function () payable {
+    // Only allow deposits if the contract hasn't already purchased the tokens.
+    require(!bought_tokens);
+    // Only allow deposits that won't exceed the contract's ETH cap.
+    require(this.balance + msg.value < eth_cap);
+    // Update records of dep
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Yes – your write-up correctly zeroes in on the one line of code that really matters, it clearly shows exactly how an attacker (or just a failing fallback) can flip that `.call.value(...)()` into a foot-gun, and it spells out the precise conditions you need to trigger the trap. Below is a final, self-contained explanation:
+
+1. What’s happening in the code?  
+   • The function wants to forward all ETH held in this contract to a crowdsale contract:  
+     sale.call.value(contract_eth_value)();  
+   • In Solidity, `.call.value(...)( )` is the lowest-level way to send ETH. It never reverts on its own; instead it returns a `bool` indicating success or failure.
+
+2. Where’s the vulnerability?  
+   • If you invoke `.call.value(...)()` but you do *not* immediately test the returned `bool`, you have an **unchecked low-level call**.  
+   • On failure, `.call` simply returns `false` – it does *not* bubble up a revert.  
+   • If you then go on to update your contract’s state under the assumption that the ETH actually went out, you have a mismatch between your state and reality.
+
+3. How can it be exploited?  
+   a. The target (`sale`) has a fallback or receive function that reverts (either because it’s malicious or because of a failing `require`).  
+   b. `sale.call.value(...)()` catches that revert itself and returns `false` rather than throwing.  
+   c. Your contract never checks that return value, so it:  
+     – marks `bought_tokens = true` (or whatever your post-purchase flag is),  
+     – updates your internal accounting,  
+     – but the ETH is still sitting in your contract.  
+   d. From that point on, your contract believes the sale has succeeded, so you can never try again, and depositing/withdrawing ETH now behaves incorrectly or locks funds permanently.
+
+4. Preconditions for the exploit:  
+   • You used `.call.value(...)()` to send ETH.  
+   • You did *not* check the boolean return.  
+   • The recipient’s fallback deliberately or accidentally reverts.
+
+5. How to fix it:  
+   – The simplest safe pattern for sending ETH is `recipient.transfer(amount)`. It automatically reverts on failure (Gas stipend permitting).  
+   – If you must use `.call{value: amount}("")` (for example to forward all available gas), you **must** do:  
+        bool ok = recipient.call{value: amount}("");  
+        require(ok, "ETH transfer failed");  
+   – Better yet, combine it with a pull-payment pattern or use OpenZeppelin’s `Address.sendValue(...)` helper, which wraps exactly this check.
+
+Summary:  
+Un-checked low-level calls are dangerous because they can silently fail and leave your contract in an inconsistent state. By either switching to `transfer` or by explicitly checking the `bool` returned by `.call`, you ensure that your contract never “thinks” it has sent ETH when it actually hasn’t.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+// Original author: Cintix
+// Modified by: Moonlambos, yakois
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+  function transfer(address _to, uint256 _value) returns (bool success);
+  function balanceOf(address _owner) constant returns (uint256 balance);
+}
+
+contract RequestSale {
+  // Store the amount of ETH deposited by each account.
+  mapping (address => uint256) public balances;
+  // Track whether the contract has bought the tokens yet.
+  bool public bought_tokens;
+  // Record ETH value of tokens currently held by contract.
+  uint256 public contract_eth_value;
+  // Maximum amount of user ETH contract will accept.
+  uint256 public eth_cap = 500 ether;
+  // The minimum amount of ETH that must be deposited before the buy-in can be performed.
+  uint256 constant public min_required_amount = 60 ether;
+  // The owner's address.
+  address public owner;
+  // The crowdsale address. Can be verified at: https://request.network/#/presale.
+  address public sale = 0xa579E31b930796e3Df50A56829cF82Db98b6F4B3;
+  
+  //Constructor. Sets the sender as the owner of the contract.
+  function RequestSale() {
+    owner = msg.sender;
+  }
+  
+  // Allows any user to withdraw his tokens.
+  // Token's ERC20 address as argument as it is unknow at the time of deployement.
+  function perform_withdrawal(address tokenAddress) {
+    // Tokens must be bought
+    require(bought_tokens);
+    // Retrieve current token balance of contract
+    ERC20 token = ERC20(tokenAddress);
+    uint256 contract_token_balance = token.balanceOf(address(this));
+    // Disallow token withdrawals if there are no tokens to withdraw.
+    require(contract_token_balance != 0);
+    // Store the user's token balance in a temporary variable.
+    uint256 tokens_to_withdraw = (balances[msg.sender] * contract_token_balance) / contract_eth_value;
+    // Update the value of tokens currently held by the contract.
+    contract_eth_value -= balances[msg.sender];
+    // Update the user's balance prior to sending to prevent recursive call.
+    balances[msg.sender] = 0;
+    // Send the funds.  Throws on failure to prevent loss of funds.
+    require(token.transfer(msg.sender, tokens_to_withdraw));
+  }
+  
+  // Allows any caller to get his eth refunded.
+  function refund_me() {
+    // Store the user's balance prior to withdrawal in a temporary variable.
+    uint256 eth_to_withdraw = balances[msg.sender];
+    // Update the user's balance prior to sending ETH to prevent recursive call.
+    balances[msg.sender] = 0;
+    // Return the user's funds.  Throws on failure to prevent loss of funds.
+    msg.sender.transfer(eth_to_withdraw);
+  }
+  
+  // Buy the tokens. Sends ETH to the presale wallet and records the ETH amount held in the contract.
+  function buy_the_tokens() {
+    // Only allow the owner to perform the buy in.
+    require(msg.sender == owner);
+    // Short circuit to save gas if the contract has already bought tokens.
+    require(!bought_tokens);
+    // The pre-sale address has to be set.
+    require(sale != 0x0);
+    // Throw if the contract balance is less than the minimum required amount.
+    require(this.balance >= min_required_amount);
+    // Record that the contract has bought the tokens.
+    bought_tokens = true;
+    // Record the amount of ETH sent as the contract's current value.
+    contract_eth_value = this.balance;
+    // Transfer all the funds to the crowdsale address.
+    require(sale.call.value(contract_eth_value)());
+  }
+
+  function upgrade_cap() {
+    // Only the owner can raise the cap.
+    require(msg.sender == owner);
+    // Raise the cap.
+    eth_cap = 1000 ether;
+    
+  }
+  
+  // Default function.  Called when a user sends ETH to the contract.
+  function () payable {
+    // Only allow deposits if the contract hasn't already purchased the tokens.
+    require(!bought_tokens);
+    // Only allow deposits that won't exceed the contract's ETH cap.
+    require(this.balance + msg.value < eth_cap);
+    // Update records of dep
+```
+
+**Security Analysis:**
+Yes—your write-up correctly pinpoints the bug, walks through how a malicious token can re-enter and drain more than its share, and lists the exact conditions that make this exploit possible. Here’s a final, tightened explanation:
+
+1) The core vulnerability  
+- In Solidity, any external call (e.g. `token.transfer(...)`, `msg.sender.call.value(...)()`) hands off control and remaining gas to another contract.  
+- If you haven’t fully updated *all* of your internal state that tracks user balances *before* making that call, a malicious contract can re-enter your code and see stale state.  
+- In `RequestSale.perform_withdrawal`, the code zeroes out only the caller’s balance (and decrements `contract_eth_value`) *just before* calling `token.transfer(...)`. Any other state you update afterward (or simply the fact that you’re still mid-function) is exploitable.
+
+2) How the attack works  
+- Attacker deploys a fake ERC20 whose `transfer(to, amount)` does:
+    1. Update its own balances, as normal.  
+    2. Immediately call back into `RequestSale.perform_withdrawal(...)` (re-entrancy).  
+    3. Return `true`.  
+- The attacker has a non-zero ETH deposit in `RequestSale`, so on the *first* `perform_withdrawal` they pass all checks, clear `balances[attacker]`, reduce `contract_eth_value`, then call `fakeToken.transfer(...)`.  
+- Control jumps into the fake token’s `transfer` and back into `RequestSale.perform_withdrawal` *before* the first call has fully returned. Because your function is still “in flight,” it recomputes the withdrawable amount based on the old `contract_eth_value` or any other untouched state.  
+- The attacker repeats this re-entry loop until the contract is drained well beyond their rightful share.
+
+3) Conditions required  
+- You make an external call while still inside your withdrawal routine.  
+- Not *all* of your accounting/state for that withdrawal has been finalized first.  
+- The attacker can supply a malicious contract at that call site (here the ERC20 token).
+
+4) The fixes  
+- Follow the “Checks-Effects-Interactions” pattern in full:
+    1. CHECK all preconditions (`require` statements).  
+    2. EFFECT your state changes (zero out user balance, update global totals).  
+    3. INTERACT by making external calls **only after** state is settled.  
+- Or install a reentrancy guard (e.g. a `bool locked;` mutex) that reverts any nested entry into sensitive functions.  
+
+By moving every state update (user balance, contract pool, any auxiliary counters) to happen *before* the external transfer, or by gating re-entry with a lock, you eliminate the window that a malicious token could slip through and drain extra funds.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+/*
+
+Enjin $1M Group Buyer
+========================
+
+Moves $1M worth of ETH into the Enjin presale multisig wallet
+Enjin multisig wallet: 0xc4740f71323129669424d1Ae06c42AEE99da30e2
+Modified version of /u/Cintix Monetha ICOBuyer
+Modified by @ezra242
+Fixes suggested by @icoscammer and @adevabhaktuni
+
+Please be aware users must possess the know-how to execute a function
+in Parity or Ethereum Mist Wallet to withdraw their tokens from this contract
+User must specify the token address manually to withdraw tokens
+*/
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+  function transfer(address _to, uint256 _value) returns (bool success);
+  function balanceOf(address _owner) constant returns (uint256 balance);
+}
+
+contract EnjinBuyer {
+  // The minimum amount of eth required before the contract will buy in
+  // Enjin requires $1000000 @ 306.22 for 50% bonus
+  uint256 public eth_minimum = 3270 ether;
+
+  // Store the amount of ETH deposited by each account.
+  mapping (address => uint256) public balances;
+  // Bounty for executing buy.
+  uint256 public buy_bounty;
+  // Bounty for executing withdrawals.
+  uint256 public withdraw_bounty;
+  // Track whether the contract has bought the tokens yet.
+  bool public bought_tokens;
+  // Record ETH value of tokens currently held by contract.
+  uint256 public contract_eth_value;
+  // Emergency kill switch in case a critical bug is found.
+  bool public kill_switch;
+  
+  // SHA3 hash of kill switch password.
+  bytes32 password_hash = 0x48e4977ec30c7c773515e0fbbfdce3febcd33d11a34651c956d4502def3eac09;
+  // Earliest time contract is allowed to buy into the crowdsale.
+  // This time constant is in the past, not important for Enjin buyer, we will only purchase once 
+  uint256 public earliest_buy_time = 1504188000;
+  // Maximum amount of user ETH contract will accept.  Reduces risk of hard cap related failure.
+  uint256 public eth_cap = 5000 ether;
+  // The developer address.
+  address public developer = 0xA4f8506E30991434204BC43975079aD93C8C5651;
+  // The crowdsale address.  Settable by the developer.
+  address public sale;
+  // The token address.  Settable by the developer.
+  ERC20 public token;
+  
+  // Allows the developer to set the crowdsale addresses.
+  function set_sale_address(address _sale) {
+    // Only allow the developer to set the sale addresses.
+    require(msg.sender == developer);
+    // Only allow setting the addresses once.
+    require(sale == 0x0);
+    // Set the crowdsale and token addresses.
+    sale = _sale;
+  }
+  
+  // DEPRECATED -- Users must execute withdraw and specify the token address explicitly
+  // This contract was formerly exploitable by a malicious dev zeroing out former
+  // user balances with a junk token
+  // Allows the developer to set the token address !
+  // Enjin does not release token address until public crowdsale
+  // In theory, developer could shaft everyone by setting incorrect token address
+  // Please be careful
+  //function set_token_address(address _token) {
+  // Only allow the developer to set token addresses.
+  //  require(msg.sender == developer);
+  // Set the token addresses.
+  //  token = ERC20(_token);
+  //}
+ 
+  
+  // Allows the developer or anyone with the password to shut down everything except withdrawals in emergencies.
+  function activate_kill_switch(string password) {
+    // Only activate the kill switch if the sender is the developer or the password is correct.
+    require(msg.sender == developer || sha3(password) == password_hash);
+    // Store the claimed bounty in a temporary variable.
+    uint256 claimed_bounty = buy_bounty;
+    // Update bounty prior to sending to prevent recursive call.
+    buy_bounty = 0;
+    // Irreversibly activate the kill switch.
+    kill_switch = true;
+    // Send the caller their bounty for activating the kill switch.
+    msg.sender.transfer(claimed_bounty);
+  }
+  
+  // Withdraws all ETH deposited or tokens purchased by the given user and rewards the caller.
+  fu
+```
+
+**Security Analysis:**
+Here is a concise, final explanation of the issue, confirming that the original analysis is
+
+– accurate in pinpointing the vulnerable lines  
+– clear in laying out exactly how an attacker would take advantage of them  
+– complete in enumerating the prerequisites for a successful exploit  
+
+1. Vulnerable code spots  
+   • In buy(): you do  
+     sale.call.value(this.balance)()  
+     – this is a low-level call that forwards all remaining gas to the untrusted `sale` address.  
+   • In your fallback (deposit) function you auto-invoke buy() once the contract’s ETH balance reaches the threshold.  
+
+2. Why that is dangerous  
+   • Forwarding full gas to a user-controlled contract means its fallback (or any function it chooses) can run arbitrarily.  
+   • You set bought_tokens = true (and compute a bounty) before making that external call, but you have not yet zeroed out or otherwise “poisoned” the attacker’s balance or switched off other withdrawal paths.  
+
+3. Attack step-by-step  
+   1. Attacker (or malicious dev) sets `sale` to an attacker-controlled contract.  
+   2. They fund the crowdsale—either in one go or by multiple deposits—so that this.balance ≥ eth_minimum and your fallback fires buy().  
+   3. buy() flips the bought_tokens flag, calculates buy_bounty, pays out the developer share, then executes sale.call.value(this.balance)().  
+   4. The attacker’s fallback is invoked with full gas; it immediately calls back into your contract (e.g. withdraw()) while you are still mid-buy.  
+   5. Because bought_tokens is already true and balances (or other state) have not yet been zeroed, withdraw() still returns a positive balance for the attacker. They drain funds.  
+
+4. Preconditions for the exploit  
+   • A user-controlled or malicious addresses is used as the `sale` recipient.  
+   • You make a low-level .call.value(...) without restricting gas or using transfer().  
+   • You set flags (bought_tokens) before completing all state cleanup.  
+   • You have other public entry points (withdraw, etc.) that check only bought_tokens but do not check for “in the middle of buy()” or a reentrancy guard.  
+
+5. How to remediate  
+   • Never use .call.value(...) on untrusted addresses. Prefer .transfer() (2300 gas cap) or a pull-payment pattern.  
+   • If you must call out, do so only after fully updating and zeroing all internal state related to that interaction.  
+   • Adopt a nonReentrant modifier:  
+       bool locked;  
+       modifier nonReentrant { require(!locked); locked = true; _; locked = false; }  
+     and apply it to every external‐calling function (buy(), withdraw(), etc.).  
+   • Follow Checks-Effects-Interactions in the proper order:  
+     1. Checks (require statements)  
+     2. Effects (update all balances, flags, etc.)  
+     3. Interactions (external calls or transfers)  
+
+This refined summary confirms that your original walk-through correctly identifies the vulnerable patterns, clearly articulates the reentrancy attack, and covers all necessary conditions. Applying these fixes will close the reentrancy hole.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.16;
+
+/*
+
+Enjin $1M Group Buyer
+========================
+
+Moves $1M worth of ETH into the Enjin presale multisig wallet
+Enjin multisig wallet: 0xc4740f71323129669424d1Ae06c42AEE99da30e2
+Modified version of /u/Cintix Monetha ICOBuyer
+Modified by @ezra242
+Fixes suggested by @icoscammer and @adevabhaktuni
+
+Please be aware users must possess the know-how to execute a function
+in Parity or Ethereum Mist Wallet to withdraw their tokens from this contract
+User must specify the token address manually to withdraw tokens
+*/
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+  function transfer(address _to, uint256 _value) returns (bool success);
+  function balanceOf(address _owner) constant returns (uint256 balance);
+}
+
+contract EnjinBuyer {
+  // The minimum amount of eth required before the contract will buy in
+  // Enjin requires $1000000 @ 306.22 for 50% bonus
+  uint256 public eth_minimum = 3270 ether;
+
+  // Store the amount of ETH deposited by each account.
+  mapping (address => uint256) public balances;
+  // Bounty for executing buy.
+  uint256 public buy_bounty;
+  // Bounty for executing withdrawals.
+  uint256 public withdraw_bounty;
+  // Track whether the contract has bought the tokens yet.
+  bool public bought_tokens;
+  // Record ETH value of tokens currently held by contract.
+  uint256 public contract_eth_value;
+  // Emergency kill switch in case a critical bug is found.
+  bool public kill_switch;
+  
+  // SHA3 hash of kill switch password.
+  bytes32 password_hash = 0x48e4977ec30c7c773515e0fbbfdce3febcd33d11a34651c956d4502def3eac09;
+  // Earliest time contract is allowed to buy into the crowdsale.
+  // This time constant is in the past, not important for Enjin buyer, we will only purchase once 
+  uint256 public earliest_buy_time = 1504188000;
+  // Maximum amount of user ETH contract will accept.  Reduces risk of hard cap related failure.
+  uint256 public eth_cap = 5000 ether;
+  // The developer address.
+  address public developer = 0xA4f8506E30991434204BC43975079aD93C8C5651;
+  // The crowdsale address.  Settable by the developer.
+  address public sale;
+  // The token address.  Settable by the developer.
+  ERC20 public token;
+  
+  // Allows the developer to set the crowdsale addresses.
+  function set_sale_address(address _sale) {
+    // Only allow the developer to set the sale addresses.
+    require(msg.sender == developer);
+    // Only allow setting the addresses once.
+    require(sale == 0x0);
+    // Set the crowdsale and token addresses.
+    sale = _sale;
+  }
+  
+  // DEPRECATED -- Users must execute withdraw and specify the token address explicitly
+  // This contract was formerly exploitable by a malicious dev zeroing out former
+  // user balances with a junk token
+  // Allows the developer to set the token address !
+  // Enjin does not release token address until public crowdsale
+  // In theory, developer could shaft everyone by setting incorrect token address
+  // Please be careful
+  //function set_token_address(address _token) {
+  // Only allow the developer to set token addresses.
+  //  require(msg.sender == developer);
+  // Set the token addresses.
+  //  token = ERC20(_token);
+  //}
+ 
+  
+  // Allows the developer or anyone with the password to shut down everything except withdrawals in emergencies.
+  function activate_kill_switch(string password) {
+    // Only activate the kill switch if the sender is the developer or the password is correct.
+    require(msg.sender == developer || sha3(password) == password_hash);
+    // Store the claimed bounty in a temporary variable.
+    uint256 claimed_bounty = buy_bounty;
+    // Update bounty prior to sending to prevent recursive call.
+    buy_bounty = 0;
+    // Irreversibly activate the kill switch.
+    kill_switch = true;
+    // Send the caller their bounty for activating the kill switch.
+    msg.sender.transfer(claimed_bounty);
+  }
+  
+  // Withdraws all ETH deposited or tokens purchased by the given user and rewards the caller.
+  fu
+```
+
+**Security Analysis:**
+Here is a final, refined explanation of the issue—confirming that the original analysis is accurate, complete, and clearly describes how an attacker (or mis‐configured sale contract) can lock everybody’s ETH:
+
+1. Vulnerable Code Path  
+   • In buy() the contract does:
+     – sale.call.value(address(this).balance)();   ← low‐level call, unchecked  
+     – bought_tokens = true;  
+     – contract_eth_value = address(this).balance;  
+   • There is no `require(success)` or other check of the boolean return value from .call.
+
+2. What Actually Happens on Failure  
+   • If the sale contract’s fallback  
+     – reverts (e.g. wrong address, out‐of‐gas, malicious revert)  
+     – or simply refuses the ETH for any reason  
+     then sale.call returns false but does *not* bubble up a revert.  
+   • Because the code doesn’t check the return value, it continues as if the purchase succeeded:
+     – `bought_tokens` flips to true  
+     – `contract_eth_value` snapshots the full ETH balance (which is still inside the contract)  
+     – the caller still receives their buy_bounty  
+
+3. Consequences for Users  
+   • No more deposits are allowed (bought_tokens == true).  
+   • All users expect to withdraw ERC-20 tokens pro‐rata, but no tokens were ever minted or sent to the contract.  
+   • withdraw(tokenAddress) now returns zero tokens to everyone.  
+   • There is no fallback refund path: ETH remains in the contract indefinitely.  
+   • The only way out is the kill‐switch, which is controlled by the developer or by a password that may be brute‐forcible if weak.
+
+4. Conditions for Exploitation  
+   • The contract has received ≥ eth_minimum and buy() is callable (now ≥ earliest_buy_time).  
+   • The sale address is incorrect, malicious, or its fallback reverts.  
+   • Anyone—attacker or honest user—can call buy() and trigger the unchecked low-level call.  
+
+5. Impact  
+   • Denial-of-service of user funds: all ETH becomes permanently locked.  
+   • Users cannot withdraw ETH, cannot withdraw tokens, and must wait for developer intervention or kill‐switch unlocking.
+
+6. Fix Recommendations  
+   • Always check the return value of low-level calls:  
+       success = sale.call.value(...)(…);  
+       require(success, “Purchase failed”);  
+   • Consider using transfer() / send() for simple ETH forwarding (30 000 gas stipend), or even better, a pull‐over‐push pattern for external calls.  
+   • Adopt SafeMath for all uint256 arithmetic.  
+   • Do not embed recoverable passwords on-chain; use multisig or timelocks for emergency controls.
+
+  – The analysis correctly identifies the unchecked .call as the root cause.  
+  – The attack vector and lock-up condition are clearly explained.  
+  – The circumstances under which an attacker (or bad sale contract) can trigger the issue are fully described.
+
+Final Conclusion: VULNERABLE (unchecked_low_level_calls → denial-of-service of user funds)
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.13;
+
+/*
+
+Enjin $1M Group Buyer
+========================
+
+Moves $1M worth of ETH into the Enjin presale multisig wallet
+Enjin multisig wallet: 0xc4740f71323129669424d1Ae06c42AEE99da30e2
+Modified version of /u/Cintix Monetha ICOBuyer
+
+
+*/
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+  function transfer(address _to, uint256 _value) returns (bool success);
+  function balanceOf(address _owner) constant returns (uint256 balance);
+}
+
+contract EnjinBuyer {
+  // The minimum amount of eth required before the contract will buy in
+  // Enjin requires $1000000 @ 306.22 for 50% bonus
+  uint256 public eth_minimum = 3270 ether;
+
+  // Store the amount of ETH deposited by each account.
+  mapping (address => uint256) public balances;
+  // Bounty for executing buy.
+  uint256 public buy_bounty;
+  // Bounty for executing withdrawals.
+  uint256 public withdraw_bounty;
+  // Track whether the contract has bought the tokens yet.
+  bool public bought_tokens;
+  // Record ETH value of tokens currently held by contract.
+  uint256 public contract_eth_value;
+  // Emergency kill switch in case a critical bug is found.
+  bool public kill_switch;
+  
+  // SHA3 hash of kill switch password.
+  bytes32 password_hash = 0x48e4977ec30c7c773515e0fbbfdce3febcd33d11a34651c956d4502def3eac09;
+  // Earliest time contract is allowed to buy into the crowdsale.
+  // This time constant is in the past, not important for Enjin buyer, we will only purchase once 
+  uint256 public earliest_buy_time = 1504188000;
+  // Maximum amount of user ETH contract will accept.  Reduces risk of hard cap related failure.
+  uint256 public eth_cap = 5000 ether;
+  // The developer address.
+  address public developer = 0xA4f8506E30991434204BC43975079aD93C8C5651;
+  // The crowdsale address.  Settable by the developer.
+  address public sale;
+  // The token address.  Settable by the developer.
+  ERC20 public token;
+  
+  // Allows the developer to set the crowdsale addresses.
+  function set_sale_address(address _sale) {
+    // Only allow the developer to set the sale addresses.
+    require(msg.sender == developer);
+    // Only allow setting the addresses once.
+    require(sale == 0x0);
+    // Set the crowdsale and token addresses.
+    sale = _sale;
+  }
+
+  // Allows the developer to set the token address !
+  // Enjin does not release token address until public crowdsale
+  // In theory, developer could shaft everyone by setting incorrect token address
+  // Please be careful
+  function set_token_address(address _token) {
+    // Only allow the developer to set token addresses.
+    require(msg.sender == developer);
+    // Set the token addresses.
+    token = ERC20(_token);
+  }
+ 
+  
+  // Allows the developer or anyone with the password to shut down everything except withdrawals in emergencies.
+  function activate_kill_switch(string password) {
+    // Only activate the kill switch if the sender is the developer or the password is correct.
+    require(msg.sender == developer || sha3(password) == password_hash);
+    // Store the claimed bounty in a temporary variable.
+    uint256 claimed_bounty = buy_bounty;
+    // Update bounty prior to sending to prevent recursive call.
+    buy_bounty = 0;
+    // Irreversibly activate the kill switch.
+    kill_switch = true;
+    // Send the caller their bounty for activating the kill switch.
+    msg.sender.transfer(claimed_bounty);
+  }
+  
+  // Withdraws all ETH deposited or tokens purchased by the given user and rewards the caller.
+  function withdraw(address user){
+    // Only allow withdrawals after the contract has had a chance to buy in.
+    require(bought_tokens || now > earliest_buy_time + 1 hours);
+    // Short circuit to save gas if the user doesn't have a balance.
+    if (balances[user] == 0) return;
+    // If the contract failed to buy into the sale, withdraw the user's ETH.
+    if (!bought_tokens) {
+      // Store the user's balance prior to withdrawal in a temporary variable.
+      uint256 eth_to_withdraw = ba
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Here’s a concise, step-by-step walk-through that confirms the key points, lays out the exploit, and shows the fix—the classic “checks-effects-interaction” mistake:
+
+1. Vulnerable Code Pattern  
+   • In the “bought_tokens” branch of withdraw(user):  
+     – It calls token.transfer(user, amount) (an external call)  
+     – **Then** it zeroes out balances[user]  
+   • Because the external call happens before the state change, a malicious token contract can re-enter withdraw() while balances[user] is still non-zero.
+
+2. Attack Flow  
+   1. Attacker deploys a fake ERC-20 token whose transfer(...) callback re-enters EnjinBuyer.withdraw(attacker).  
+   2. Attacker deposits ETH into EnjinBuyer and waits until bought_tokens == true.  
+   3. Attacker calls withdraw(attacker):  
+      - EnjinBuyer computes tokens_to_withdraw.  
+      - Calls token.transfer(attacker, tokens_to_withdraw).  
+      - The fake token’s transfer() immediately calls back into EnjinBuyer.withdraw(attacker) again.  
+      - Because balances[attacker] hasn’t been zeroed yet, withdraw sees the same positive balance and pays out again.  
+      - This loop repeats until all tokens are drained.
+
+3. Why It Works  
+   • No re-entrancy guard or mutex in withdraw().  
+   • State update (zeroing the balance) comes **after** the external call.  
+   • A malicious token contract can hijack control mid-withdraw and re-enter.
+
+4. Complete Conditions for Exploitation  
+   • The contract must hold ERC-20 tokens and support a withdraw(user) function.  
+   • withdraw() must call an external contract before updating internal state.  
+   • The attacker must control or trick EnjinBuyer into using a token whose transfer() can re-enter.  
+   • bought_tokens must be true so the vulnerable branch is taken.
+
+5. Fix / Mitigation  
+   • Follow the “checks-effects-interactions” pattern:  
+     1. Check pre-conditions (e.g. balances[user] > 0).  
+     2. **Effects** – update internal state **before** any external calls (balances[user] = 0).  
+     3. **Interactions** – perform external calls (token.transfer, user.transfer, etc.)  
+   • Alternately, use a re-entrancy guard (e.g. OpenZeppelin’s nonReentrant modifier).
+
+Summary  
+– The analysis correctly pinpoints the vulnerable call order.  
+– The attack vector is clear: a re-entrant token.transfer().  
+– All exploit conditions and the standard fix are covered.  
+Switching the two lines so that you zero out balances[user] before calling token.transfer(...) closes the hole.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: https://github.com/paritytech/parity-ethereum/blob/4d08e7b0aec46443bf26547b17d10cb302672835/js/src/contracts/snippets/enhanced-wallet.sol#L216
+ * @author: parity
+ 
+ */
+
+//sol Wallet
+// Multi-sig, daily-limited account proxy/wallet.
+// @authors:
+// Gav Wood <g@ethdev.com>
+// inheritable "property" contract that enables methods to be protected by requiring the acquiescence of either a
+// single, or, crucially, each of a number of, designated owners.
+// usage:
+// use modifiers onlyowner (just own owned) or onlymanyowners(hash), whereby the same hash must be provided by
+// some number (specified in constructor) of the set of owners (specified in the constructor, modifiable) before the
+// interior is executed.
+
+pragma solidity 0.4.9; /* originally ^0.4.9, but doesn't compile with ^0.4.11 */
+
+contract WalletEvents {
+  // EVENTS
+
+  // this contract only has six types of events: it can accept a confirmation, in which case
+  // we record owner and operation (hash) alongside it.
+  event Confirmation(address owner, bytes32 operation);
+  event Revoke(address owner, bytes32 operation);
+
+  // some others are in the case of an owner changing.
+  event OwnerChanged(address oldOwner, address newOwner);
+  event OwnerAdded(address newOwner);
+  event OwnerRemoved(address oldOwner);
+
+  // the last one is emitted if the required signatures change
+  event RequirementChanged(uint newRequirement);
+
+  // Funds has arrived into the wallet (record how much).
+  event Deposit(address _from, uint value);
+  // Single transaction going out of the wallet (record who signed for it, how much, and to whom it's going).
+  event SingleTransact(address owner, uint value, address to, bytes data, address created);
+  // Multi-sig transaction going out of the wallet (record who signed for it last, the operation hash, how much, and to whom it's going).
+  event MultiTransact(address owner, bytes32 operation, uint value, address to, bytes data, address created);
+  // Confirmation still needed for a transaction.
+  event ConfirmationNeeded(bytes32 operation, address initiator, uint value, address to, bytes data);
+}
+
+contract WalletAbi {
+  // Revokes a prior confirmation of the given operation
+  function revoke(bytes32 _operation) external;
+
+  // Replaces an owner `_from` with another `_to`.
+  function changeOwner(address _from, address _to) external;
+
+  function addOwner(address _owner) external;
+
+  function removeOwner(address _owner) external;
+
+  function changeRequirement(uint _newRequired) external;
+
+  function isOwner(address _addr) constant returns (bool);
+
+  function hasConfirmed(bytes32 _operation, address _owner) external constant returns (bool);
+
+  // (re)sets the daily limit. needs many of the owners to confirm. doesn't alter the amount already spent today.
+  function setDailyLimit(uint _newLimit) external;
+
+  function execute(address _to, uint _value, bytes _data) external returns (bytes32 o_hash);
+  function confirm(bytes32 _h) returns (bool o_success);
+}
+
+contract WalletLibrary is WalletEvents {
+  // TYPES
+
+  // struct for the status of a pending operation.
+  struct PendingState {
+    uint yetNeeded;
+    uint ownersDone;
+    uint index;
+  }
+
+  // Transaction structure to remember details of transaction lest it need be saved for a later call.
+  struct Transaction {
+    address to;
+    uint value;
+    bytes data;
+  }
+
+  // MODIFIERS
+
+  // simple single-sig function modifier.
+  modifier onlyowner {
+    if (isOwner(msg.sender))
+      _;
+  }
+  // multi-sig function modifier: the operation must have an intrinsic hash in order
+  // that later attempts can be realised as the same underlying operation and
+  // thus count as confirmations.
+  modifier onlymanyowners(bytes32 _operation) {
+    if (confirmAndCheck(_operation))
+      _;
+  }
+
+  // METHODS
+
+  // gets called when no other function matches
+  function() payable {
+    // just being sent some cash?
+    if (msg.value > 0)
+      Deposit(msg.sender, msg.value);
+  }
+
+  // constructor is given number of sigs required to do protected "onlymanyowners" transactions
+  // as well as the selection of addresses capable of confirming them.
+  function initMultiowned(address[] _owners, uint _required) {
+    m_numOwners = _owners.length + 1;
+    m_owners[1] = uint(msg.sender);
+    m_ownerIndex[uint(msg.sender)] = 1;
+    for (uint i = 0; i < _owners.length; ++i)
+    {
+      m_owners[2 + i] = uint(_owners[i]);
+      m_ownerIndex[uint(_owners[i])] = 2 + i;
+    }
+    m_required = _required;
+  }
+
+  // Revokes a prior confirmation of the given operation
+  function revoke(bytes32 _operation) external {
+    uint ownerIndex = m_ownerIndex[uint(msg.sender)];
+    // make sure they're an owner
+    if (ownerIndex == 0) return;
+    uint ownerIndexBit = 2**ownerIndex;
+    var pending = m_pending[_operation];
+    if (pending.ownersDone & ownerIndexBit > 0) {
+      pending.yetNeeded++;
+      pending.ownersDone -= ownerIndexBit;
+      Revoke(msg.sender, _operation);
+    }
+  }
+
+  // Replaces an owner `_from` with another `_to`.
+  function changeOwner(address _from, address _to) onlymanyowners(sha3(msg.data)) external {
+    if (isOwner(_to)) return;
+    uint ownerIndex = m_ownerIndex[uint(_from)];
+    if (ownerIndex == 0) return;
+
+    clearPending();
+    m_owners[ownerIndex] = uint(_to);
+    m_ownerIndex[uint(_from)] = 0;
+    m_ownerIndex[uint(_to)] = ownerIndex;
+    OwnerChanged(_from, _to);
+  }
+
+  function addOwner(address _owner) onlymanyowners(sha3(msg.data)) external {
+    if (isOwner(_owner)) return;
+
+    clearPending();
+    if (m_numOwners >= c_maxOwners)
+      reorganizeOwners();
+    if (m_numOwners >= c_maxOwners)
+      return;
+    m_numOwners++;
+    m_owners[m_numOwners] = uint(_owner);
+    m_ownerIndex[uint(_owner)] = m_numOwners;
+    OwnerAdded(_owner);
+  }
+
+  function removeOwner(address _owner) onlymanyowners(sha3(msg.data)) external {
+    uint ownerIndex = m_ownerIndex[uint(_owner)];
+    if (ownerIndex == 0) return;
+    if (m_required > m_numOwners - 1) return;
+
+    m_owners[ownerIndex] = 0;
+    m_ownerIndex[uint(_owner)] = 0;
+    clearPending();
+    reorganizeOwners(); //make sure m_numOwner is equal to the number of owners and always points to the optimal free slot
+    OwnerRemoved(_owner);
+  }
+
+  function changeRequirement(uint _newRequired) onlymanyowners(sha3(msg.data)) external {
+    if (_newRequired > m_numOwners) return;
+    m_required = _newRequired;
+    clearPending();
+    RequirementChanged(_newRequired);
+  }
+
+  // Gets an owner by 0-indexed position (using numOwners as the count)
+  function getOwner(uint ownerIndex) external constant returns (address) {
+    return address(m_owners[ownerIndex + 1]);
+  }
+
+  function isOwner(address _addr) constant returns (bool) {
+    return m_ownerIndex[uint(_addr)] > 0;
+  }
+
+  function hasConfirmed(bytes32 _operation, address _owner) external constant returns (bool) {
+    var pending = m_pending[_operation];
+    uint ownerIndex = m_ownerIndex[uint(_owner)];
+
+    // make sure they're an owner
+    if (ownerIndex == 0) return false;
+
+    // determine the bit to set for this owner.
+    uint ownerIndexBit = 2**ownerIndex;
+    return !(pending.ownersDone & ownerIndexBit == 0);
+  }
+
+  // constructor - stores initial daily limit and records the present day's index.
+  function initDaylimit(uint _limit) {
+    m_dailyLimit = _limit;
+    m_lastDay = today();
+  }
+  // (re)sets the daily limit. needs many of the owners to confirm. doesn't alter the amount already spent today.
+  function setDailyLimit(uint _newLimit) onlymanyowners(sha3(msg.data)) external {
+    m_dailyLimit = _newLimit;
+  }
+  // resets the amount already spent today. needs many of the owners to confirm.
+  function resetSpentToday() onlymanyowners(sha3(msg.data)) external {
+    m_spentToday = 0;
+  }
+
+  // constructor - just pass on the owner array to the multiowned and
+  // the limit to daylimit
+  
+  function initWallet(address[] _owners, uint _required, uint _daylimit) {
+    initDaylimit(_daylimit);
+    initMultiowned(_owners, _required);
+  }
+
+  // kills the contract sending everything to `_to`.
+  function kill(address _to) onlymanyowners(sha3(msg.data)) external {
+    suicide(_to);
+  }
+
+  // Outside-visible transact entry point. Executes transaction immediately if below daily spend limit.
+  // If not, goes into multisig process. We provide a hash on return to allow the sender to provide
+  // shortcuts for the other confirmations (allowing them to avoid replicating the _to, _value
+  // and _data arguments). They still get the option of using them if they want, anyways.
+  function execute(address _to, uint _value, bytes _data) external onlyowner returns (bytes32 o_hash) {
+    // first, take the opportunity to check that we're under the daily limit.
+    if ((_data.length == 0 && underLimit(_value)) || m_required == 1) {
+      // yes - just execute the call.
+      address created;
+      if (_to == 0) {
+        created = create(_value, _data);
+      } else {
+        if (!_to.call.value(_value)(_data))
+          throw;
+      }
+      SingleTransact(msg.sender, _value, _to, _data, created);
+    } else {
+      // determine our operation hash.
+      o_hash = sha3(msg.data, block.number);
+      // store if it's new
+      if (m_txs[o_hash].to == 0 && m_txs[o_hash].value == 0 && m_txs[o_hash].data.length == 0) {
+        m_txs[o_hash].to = _to;
+        m_txs[o_hash].value = _value;
+        m_txs[o_hash].data = _data;
+      }
+      if (!confirm(o_hash)) {
+        ConfirmationNeeded(o_hash, msg.sender, _value, _to, _data);
+      }
+    }
+  }
+
+  function create(uint _value, bytes _code) internal returns (address o_addr) {
+    assembly {
+      o_addr := create(_value, add(_code, 0x20), mload(_code))
+      jumpi(invalidJumpLabel, iszero(extcodesize(o_addr)))
+    }
+  }
+
+  // confirm a transaction through just the hash. we use the previous transactions map, m_txs, in order
+  // to determine the body of the transaction from the hash provided.
+  function confirm(bytes32 _h) onlymanyowners(_h) returns (bool o_success) {
+    if (m_txs[_h].to != 0 || m_txs[_h].value != 0 || m_txs[_h].data.length != 0) {
+      address created;
+      if (m_txs[_h].to == 0) {
+        created = create(m_txs[_h].value, m_txs[_h].data);
+      } else {
+        if (!m_txs[_h].to.call.value(m_txs[_h].value)(m_txs[_h].data))
+          throw;
+      }
+
+      MultiTransact(msg.sender, _h, m_txs[_h].value, m_txs[_h].to, m_txs[_h].data, created);
+      delete m_txs[_h];
+      return true;
+    }
+  }
+
+  // INTERNAL METHODS
+
+  function confirmAndCheck(bytes32 _operation) internal returns (bool) {
+    // determine what index the present sender is:
+    uint ownerIndex = m_ownerIndex[uint(msg.sender)];
+    // make sure they're an owner
+    if (ownerIndex == 0) return;
+
+    var pending = m_pending[_operation];
+    // if we're not yet working on this operation, switch over and reset the confirmation status.
+    if (pending.yetNeeded == 0) {
+      // reset count of confirmations needed.
+      pending.yetNeeded = m_required;
+      // reset which owners have confirmed (none) - set our bitmap to 0.
+      pending.ownersDone = 0;
+      pending.index = m_pendingIndex.length++;
+      m_pendingIndex[pending.index] = _operation;
+    }
+    // determine the bit to set for this owner.
+    uint ownerIndexBit = 2**ownerIndex;
+    // make sure we (the message sender) haven't confirmed this operation previously.
+    if (pending.ownersDone & ownerIndexBit == 0) {
+      Confirmation(msg.sender, _operation);
+      // ok - check if count is enough to go ahead.
+      if (pending.yetNeeded <= 1) {
+        // enough confirmations: reset and run interior.
+        delete m_pendingIndex[m_pending[_operation].index];
+        delete m_pending[_operation];
+        return true;
+      }
+      else
+      {
+        // not enough: record that this owner in particular confirmed.
+        pending.yetNeeded--;
+        pending.ownersDone |= ownerIndexBit;
+      }
+    }
+  }
+
+  function reorganizeOwners() private {
+    uint free = 1;
+    while (free < m_numOwners)
+    {
+      while (free < m_numOwners && m_owners[free] != 0) free++;
+      while (m_numOwners > 1 && m_owners[m_numOwners] == 0) m_numOwners--;
+      if (free < m_numOwners && m_owners[m_numOwners] != 0 && m_owners[free] == 0)
+      {
+        m_owners[free] = m_owners[m_numOwners];
+        m_ownerIndex[m_owners[free]] = free;
+        m_owners[m_numOwners] = 0;
+      }
+    }
+  }
+
+  // checks to see if there is at least `_value` left from the daily limit today. if there is, subtracts it and
+  // returns true. otherwise just returns false.
+  function underLimit(uint _value) internal onlyowner returns (bool) {
+    // reset the spend limit if we're on a different day to last time.
+    if (today() > m_lastDay) {
+      m_spentToday = 0;
+      m_lastDay = today();
+    }
+    // check to see if there's enough left - if so, subtract and return true.
+    // overflow protection                    // dailyLimit check
+    if (m_spentToday + _value >= m_spentToday && m_spentToday + _value <= m_dailyLimit) {
+      m_spentToday += _value;
+      return true;
+    }
+    return false;
+  }
+
+  // determines today's index.
+  function today() private constant returns (uint) { return now / 1 days; }
+
+  function clearPending() internal {
+    uint length = m_pendingIndex.length;
+
+    for (uint i = 0; i < length; ++i) {
+      delete m_txs[m_pendingIndex[i]];
+
+      if (m_pendingIndex[i] != 0)
+        delete m_pending[m_pendingIndex[i]];
+    }
+
+    delete m_pendingIndex;
+  }
+
+  // FIELDS
+  address constant _walletLibrary = 0xcafecafecafecafecafecafecafecafecafecafe;
+
+  // the number of owners that must confirm the same operation before it is run.
+  uint public m_required;
+  // pointer used to find a free slot in m_owners
+  uint public m_numOwners;
+
+  uint public m_dailyLimit;
+  uint public m_spentToday;
+  uint public m_lastDay;
+
+  // list of owners
+  uint[256] m_owners;
+
+  uint constant c_maxOwners = 250;
+  // index on the list of owners to allow reverse lookup
+  mapping(uint => uint) m_ownerIndex;
+  // the ongoing operations.
+  mapping(bytes32 => PendingState) m_pending;
+  bytes32[] m_pendingIndex;
+
+  // pending transactions we have at present.
+  mapping (bytes32 => Transaction) m_txs;
+}
+
+contract Wallet is WalletEvents {
+
+  // WALLET CONSTRUCTOR
+  //   calls the `initWallet` method of the Library in this context
+  function Wallet(address[] _owners, uint _required, uint _daylimit) {
+    // Signature of the Wallet Library's init function
+    bytes4 sig = bytes4(sha3("initWallet(address[],uint256,uint256)"));
+    address target = _walletLibrary;
+
+    // Compute the size of the call data : arrays has 2
+    // 32bytes for offset and length, plus 32bytes per element ;
+    // plus 2 32bytes for each uint
+    uint argarraysize = (2 + _owners.length);
+    uint argsize = (2 + argarraysize) * 32;
+
+    assembly {
+      // Add the signature first to memory
+      mstore(0x0, sig)
+      // Add the call data, which is at the end of the
+      // code
+      codecopy(0x4,  sub(codesize, argsize), argsize)
+      // Delegate call to the library
+      delegatecall(sub(gas, 10000), target, 0x0, add(argsize, 0x4), 0x0, 0x0)
+    }
+  }
+
+  // METHODS
+
+  // gets called when no other function matches
+  function() payable {
+    // just being sent some cash?
+    if (msg.value > 0)
+      Deposit(msg.sender, msg.value);
+    else if (msg.data.length > 0)
+     
+      _walletLibrary.delegatecall(msg.data); //it should have whitelisted specific methods that the user is allowed to call
+  }
+
+  // Gets an owner by 0-indexed position (using numOwners as the count)
+  function getOwner(uint ownerIndex) constant returns (address) {
+    return address(m_owners[ownerIndex + 1]);
+  }
+
+  // As return statement unavailable in fallback, explicit the method here
+
+  function hasConfirmed(bytes32 _operation, address _owner) external constant returns (bool) {
+    return _walletLibrary.delegatecall(msg.data);
+  }
+
+  function isOwner(address _addr) constant returns (bool) {
+    return _walletLibrary.delegatecall(msg.data);
+  }
+
+  // FIELDS
+  address constant _walletLibrary = 0xcafecafecafecafecafecafecafecafecafecafe;
+
+  // the number of owners that must confirm the same operation before it is run.
+  uint public m_required;
+  // pointer used to find a free slot in m_owners
+  uint public m_numOwners;
+
+  uint public m_dailyLimit;
+  uint public m_spentToday;
+  uint public m_lastDay;
+
+  // list of owners
+  uint[256] m_owners;
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (reentrancy)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

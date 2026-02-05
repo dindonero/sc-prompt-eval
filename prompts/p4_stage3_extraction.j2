@@ -1,0 +1,98 @@
+{# GPTScan Stage 3: Key Variable/Statement Extraction #}
+{# Extract specific variables and statements for static confirmation #}
+{# Updated for DASP10 vulnerability categories - Per GPTScan Figure 5 #}
+{# IMPORTANT: Variable names must be EXACT identifiers from the code, not descriptions #}
+You are a smart contract security auditor. You will be asked questions related to code properties. You can mimic answering them in the background five times and provide me with the most frequently appearing answer.
+
+This function has been confirmed as potentially vulnerable to: {{ scenario.name }}
+
+The vulnerability property is: {{ scenario.property }}
+
+Function:
+```solidity
+{{ function_code }}
+```
+
+CRITICAL: For "name" fields below, provide the EXACT variable/identifier name as it appears in the code (e.g., "balances", "owner", "msg.sender"), NOT a description.
+
+{% if scenario.id == "reentrancy" %}
+Extract the following for reentrancy vulnerability verification:
+1. VariableA: The state variable modified after the external call (e.g., "balances", "shares", "deposited")
+2. VariableB: The external call target address variable (e.g., "msg.sender", "recipient", "to")
+3. key_statements: EXACTLY 2 statements in execution order:
+   - Statement 1: The external call statement as written in code
+   - Statement 2: The state update statement that executes AFTER the call
+
+{% elif scenario.id == "access_control" %}
+Extract the following for access control verification:
+1. VariableA: The state variable being modified without authorization (e.g., "owner", "admin", "paused"). If NO state variable is modified, use the function-affecting variable like "msg.sender".
+2. VariableB: The authorization variable that SHOULD be checked but is MISSING (e.g., "owner", "admin"). Use "NONE" if no authorization exists.
+3. key_statements: Statements showing unprotected sensitive operations (selfdestruct, fund transfers, state changes)
+NOTE: The vulnerability is the ABSENCE of authorization checks - confirm this by noting what check is missing.
+
+{% elif scenario.id == "arithmetic" %}
+Extract the following for arithmetic overflow/underflow verification:
+1. VariableA: The integer variable being modified (e.g., "balance", "totalSupply", "amount")
+2. VariableB: The variable used in the arithmetic operation (e.g., "value", "_amount")
+3. key_statements: Statements with arithmetic operations (+, -, *, /)
+
+{% elif scenario.id == "unchecked_low_level_calls" %}
+Extract the following for unchecked return value verification:
+1. VariableA: The success/return variable from the call (e.g., "success", "result"). Use "NONE" if the return value is NOT captured - that IS the vulnerability.
+2. VariableB: The call target address (e.g., "recipient", "to", "msg.sender")
+3. key_statements: The low-level call statement(s) - .call(), .send(), delegatecall()
+NOTE: The vulnerability is when the return value is NOT checked or NOT captured at all.
+
+{% elif scenario.id == "denial_of_service" %}
+Extract the following for DoS verification:
+1. VariableA: The array/mapping variable being iterated (e.g., "users", "investors", "participants")
+2. VariableB: The loop counter or iterator variable (e.g., "i", "index")
+3. key_statements: The loop or external call statements
+
+{% elif scenario.id == "bad_randomness" %}
+Extract the following for bad randomness verification:
+1. VariableA: The block property used for randomness (e.g., "block.timestamp", "blockhash", "block.number")
+2. VariableB: The variable storing the computed random value (e.g., "seed", "random", "winner")
+3. key_statements: Statements computing or using the random value
+
+{% elif scenario.id == "front_running" %}
+Extract the following for front-running verification:
+1. VariableA: The user-submitted parameter vulnerable to observation (e.g., "solution", "bid", "price")
+2. VariableB: The reward or benefit variable (e.g., "reward", "prize", "tokens")
+3. key_statements: Statements showing value submission and reward distribution
+
+{% elif scenario.id == "time_manipulation" %}
+Extract the following for timestamp manipulation verification:
+1. VariableA: The timestamp source (must be "block.timestamp" or "now")
+2. VariableB: The time-compared variable or deadline (e.g., "deadline", "lockTime", "endTime")
+3. key_statements: Statements with timestamp comparisons
+
+{% elif scenario.id == "short_addresses" %}
+Extract the following for short address verification:
+1. VariableA: The address parameter name (e.g., "_to", "recipient", "account")
+2. VariableB: The transfer amount variable (e.g., "_value", "amount")
+3. key_statements: The transfer statement(s)
+
+{% elif scenario.id == "other" %}
+Extract the following:
+1. VariableA: The primary vulnerable variable identifier (exact name from code)
+2. VariableB: The secondary related variable identifier (exact name from code)
+3. key_statements: Statements exhibiting the vulnerability pattern
+
+{% else %}
+Extract the following:
+1. VariableA: The primary vulnerable variable identifier (exact name from code)
+2. VariableB: The secondary related variable identifier (exact name from code)
+3. key_statements: Statements exhibiting the vulnerability pattern
+
+{% endif %}
+
+Answer in JSON format. For "name" fields, use EXACT identifiers from the code, not descriptions:
+{
+  "VariableA": {"name": "exact_variable_name_from_code", "description": "what this variable represents"},
+  "VariableB": {"name": "exact_variable_name_from_code", "description": "what this variable represents"},
+  "key_statements": ["exact statement from code", "exact statement from code"],
+  "vulnerable_line_numbers": [line_numbers_if_identifiable]
+}
+
+Provide only the JSON object. Do not explain.

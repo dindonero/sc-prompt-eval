@@ -1,0 +1,89 @@
+# =============================================================================
+# Mini Pilot Test: 1 contract per category, all prompts, both models
+# =============================================================================
+# Purpose: Verify prompt templates and output parsing work correctly
+# Selected contracts (10 total, 1 per category):
+#   - access_control: simple_suicide.sol
+#   - arithmetic: integer_overflow_minimal.sol
+#   - bad_randomness: guess_the_random_number.sol
+#   - denial_of_service: auction.sol
+#   - front_running: FindThisHash.sol
+#   - other: name_registrar.sol
+#   - reentrancy: reentrancy_simple.sol
+#   - short_addresses: short_address_example.sol
+#   - time_manipulation: roulette.sol
+#   - unchecked_low_level_calls: mishandled.sol
+# =============================================================================
+
+experiment_id: "mini_pilot"
+output_dir: "outputs/mini_pilot"
+runs_per_item: 1  # Single run for quick verification
+random_seed: 42
+notes: |
+  Mini pilot test to verify:
+  1. All prompt templates render correctly
+  2. Output parsing works for all prompt types
+  3. RAG retrieval works for P3
+  4. Multi-agent pipeline works for P5
+  5. Slither integration status for P4
+
+datasets:
+  - name: "smartbugs_mini"
+    kind: "smartbugs_curated"
+    path: "data/smartbugs_mini/dataset"
+
+models:
+  - name: "o4-mini"
+    provider: "openai"
+    params:
+      base_url: "https://novaimsplayground.cognitiveservices.azure.com/openai/v1/"
+      api_key_env: "AZURE_OPENAI_API_KEY"
+      max_tokens: 16000
+      # NOTE: o4-mini is an o-series model - no temperature/top_p support
+
+prompts:
+  # P0: Zero-shot baseline
+  - id: "P0_baseline"
+    template_path: "p0_baseline.j2"
+    description: "Single-pass baseline with JSON output format"
+
+  # P1: In-Context Learning (Single-Type)
+  - id: "P1_icl"
+    template_path: "p1_icl_single_type.j2"
+    description: "Per-vulnerability-type ICL with 10 API calls"
+
+  # P2: Structured Reasoning / Chain-of-Thought
+  - id: "P2_structured"
+    template_path: "p2_structured_reasoning.j2"
+    description: "Chain-of-thought with systematic audit checklist"
+
+  # P3: SmartGuard (RAG + CoT + Self-check) - Zhang et al. 2024
+  - id: "P3_smartguard"
+    template_path: "p3_smartguard.j2"
+    description: "RAG-enhanced prompt with retrieved vulnerability patterns"
+
+  # P4: Tool-Augmented GPTScan (Slither) - Sun et al. 2024
+  - id: "P4_tool_augmented"
+    template_path: "p4_stage1_scenario.j2"
+    description: "Slither static analysis + LLM hybrid"
+
+  # P5: LLM-SmartAudit Multi-Agent - Wei et al. 2024
+  - id: "P5_smartaudit"
+    template_path: "p5_project_manager.j2"
+    description: "4-agent multi-phase: PM -> Counselor -> Auditor/Expert -> Report"
+
+# Tool configuration
+tools:
+  # P3 SmartGuard RAG settings
+  top_k_patterns: 5
+  enable_cot_expansion: true  # Enable CoT generation for retrieved patterns
+
+  # P4 GPTScan Slither settings
+  slither_timeout: 120
+  p4_stage1_template: "p4_stage1_scenario.j2"
+  p4_stage2_template: "p4_stage2_property.j2"
+  p4_stage3_template: "p4_stage3_extraction.j2"
+
+  # P5 SmartAudit settings
+  smartaudit_mode: BA
+  smartaudit_max_rounds: 3

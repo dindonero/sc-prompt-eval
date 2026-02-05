@@ -1,0 +1,1711 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: ARITHMETIC VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.18;
+
+
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) public constant returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) public constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) public returns (bool);
+  function approve(address spender, uint256 value) public returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+   
+  modifier onlyPayloadSize(uint size) {
+     require(msg.data.length >= size + 4);
+     _;
+  }
+
+  
+  function transfer(address _to, uint256 _value) onlyPayloadSize(2 * 32)  public returns (bool) {
+    require (_to != address(0));
+    require (_value > 0);
+    require (balances[msg.sender] >= _value); 
+    
+
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  
+  function balanceOf(address _owner) public constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+
+}
+
+
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+
+  
+  function transferFrom(address _from, address _to, uint256 _value) onlyPayloadSize(3 * 32)  public returns (bool) {
+    require(_to != address(0));
+    require (_value > 0);
+    require (balances[_from] >= _value); 
+    
+    require (_value <= allowed[_from][msg.sender]); 
+
+    uint256 _allowance = allowed[_from][msg.sender];
+
+    balances[_from] = balances[_from].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  
+  function approve(address _spender, uint256 _value) public returns (bool) {
+  	require((_value == 0) || (allowed[msg.sender][_spender] == 0));
+
+    allowed[msg.sender][_spender] = _value;
+    Approval(msg.sender, _spender, _value);
+    return true;
+  }
+
+  
+  function allowance(address _owner, address _spender) public constant returns (uint256 remaining) {
+    return allowed[_owner][_spender];
+  }
+
+}
+
+
+
+contract Ownable {
+  address public owner;
+
+  event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+  
+  function Ownable() {
+    owner = msg.sender;
+  }
+
+  
+  modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+  }
+
+  
+  function transferOwnership(address newOwner) onlyOwner public {
+    require(newOwner != address(0));
+    OwnershipTransferred(owner, newOwner);
+    owner = newOwner;
+  }
+
+}
+
+library SafeMath {
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    
+    uint256 c = a / b;
+    
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+
+
+
+contract MagnaChain is StandardToken, Ownable{
+    
+    string public version = "1.0";
+    string public name = "MagnaChain";
+    string public symbol = "MGC";
+    uint8 public  decimals = 18;
+
+    mapping(address=>uint256)  lockedBalance;
+    mapping(address=>uint)     timeRelease; 
+    
+    uint256 internal constant INITIAL_SUPPLY = 20 * 100 * (10**6) * (10 **18);
+    uint256 internal constant MAX_TIME = 60*60*24*365*5;
+
+    event Burn(address indexed burner, uint256 value);
+    event Lock(address indexed locker, uint256 value, uint releaseTime);
+    event 
+```
+
+**Security Analysis:**
+Here is a concise, step-by-step explanation of the issue, why it can actually be exploited, and how to fix it:
+
+1) Vulnerable pattern  
+   ```solidity
+   uint256 public constant MAX_TIME = 60*60*24*365*5;  // “5-year” cap, never enforced
+   mapping(address => uint256) public lockedBalance;
+   mapping(address => uint256) public timeRelease;
+
+   function lock(uint256 _value, uint256 _duration) public {
+     // ❌ Unchecked addition: no SafeMath and no require on _duration
+     timeRelease[msg.sender] = now + _duration;
+     lockedBalance[msg.sender] += _value;
+     balances[msg.sender] -= _value;
+     Lock(msg.sender, _value, timeRelease[msg.sender]);
+   }
+
+   function release() public {
+     require(now >= timeRelease[msg.sender]);
+     uint256 value = lockedBalance[msg.sender];
+     lockedBalance[msg.sender] = 0;
+     balances[msg.sender] += value;
+   }
+   ```
+
+2) How the wrap-around attack works  
+   - Solidity’s unsigned integers wrap around modulo 2^256.  
+   - The contract does not use `SafeMath.add(now, _duration)`, nor does it enforce `_duration <= MAX_TIME`.  
+   - An attacker picks  
+       _duration ≥ 2^256 − now  
+     so that  
+       now + _duration  ≡  (now + _duration) mod 2^256  
+     becomes a small value (in fact ≤ now).  
+   - As soon as `lock(...)` finishes, `timeRelease[msg.sender]` is already in the past, so `release()`’s `require(now >= timeRelease[msg.sender])` immediately passes. The “lock” is meaningless.
+
+3) Conditions for exploitation  
+   – Unchecked addition of user-supplied `_duration` to `now`.  
+   – No `require(_duration <= MAX_TIME)`.  
+   – No SafeMath guard on that addition.  
+   – Attacker simply submits a huge `_duration` to force the wrap-around.
+
+4) How to fix it  
+   Option A (SafeMath guard):  
+     timeRelease[msg.sender] = SafeMath.add(now, _duration);  
+   Option B (hard cap + SafeMath or native check):  
+     require(_duration <= MAX_TIME);  
+     timeRelease[msg.sender] = now + _duration;  
+   Either approach prevents the overflow and/or enforces your intended maximum lock period.
+
+Summary  
+By mixing unchecked arithmetic with a user-supplied duration, the contract allows an attacker to wrap the timestamp around to the past and immediately withdraw locked tokens. Always either bound user inputs before you operate on them, or use a checked‐arithmetic library like SafeMath for every single addition or multiplication.
+
+
+**Classification**: This code contains a **arithmetic** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+contract Ownable {
+  address public owner;
+
+
+  /** 
+   *
+   * account.
+   */
+  function Ownable() internal {
+    owner = msg.sender;
+  }
+
+
+  /**
+   *
+   */
+  modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+  }
+
+
+  /**
+   *
+   *
+   */
+  function transferOwnership(address newOwner) onlyOwner public {
+    require(newOwner != address(0));
+    owner = newOwner;
+  }
+
+}
+
+/**
+ * Interface for the standard token.
+ * Based on https://github.com/ethereum/EIPs/blob/master/EIPS/eip-20-token-standard.md
+ */
+interface EIP20Token {
+  function totalSupply() external view returns (uint256);
+  function balanceOf(address who) external view returns (uint256);
+  function transfer(address to, uint256 value) external returns (bool success);
+  function transferFrom(address from, address to, uint256 value) external returns (bool success);
+  function approve(address spender, uint256 value) external returns (bool success);
+  function allowance(address owner, address spender) external view returns (uint256 remaining);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+// The owner of this contract should be an externally owned account
+contract HumanProtocolInvestment is Ownable {
+
+  // Address of the target contract
+  address public investment_address = 0x55704E8Cb15AF1054e21a7a59Fb0CBDa6Bd044B7;
+  // Major partner address
+  address public major_partner_address = 0x5a89D9f1C382CaAa66Ee045aeb8510F1205bC8bf;
+  // Minor partner address
+  address public minor_partner_address = 0xC787C3f6F75D7195361b64318CE019f90507f806;
+  // Third partner address
+  address public third_partner_address = 0xDa2cEa3DbaC30835D162Df11D21Ac6Cbf355aC9F;
+  // Additional gas used for transfers.
+  uint public gas = 1000;
+
+  // Payments to this contract require a bit of gas. 100k should be enough.
+  function() payable public {
+    execute_transfer(msg.value);
+  }
+
+  // Transfer some funds to the target investment address.
+  function execute_transfer(uint transfer_amount) internal {
+    // Major fee is 30% * (1/11) * value = 3 * value / (10 * 11)
+    uint major_fee = transfer_amount * 3 / (10 * 11);
+    // Minor fee is 20% * (1/11) * value = 2 * value / (10 * 11)
+    uint minor_fee = transfer_amount * 2 / (10 * 11);
+    // Third fee is 50% * (1/11) * value = 5 * value / (10 * 11)
+    uint third_fee = transfer_amount * 5 / (10 * 11);
+
+    require(major_partner_address.call.gas(gas).value(major_fee)());
+    require(minor_partner_address.call.gas(gas).value(minor_fee)());
+    require(third_partner_address.call.gas(gas).value(third_fee)());
+
+    // Send the rest
+    uint investment_amount = transfer_amount - major_fee - minor_fee - third_fee;
+    require(investment_address.call.gas(gas).value(investment_amount)());
+  }
+
+  // Sets the amount of additional gas allowed to addresses called
+  // @dev This allows transfers to multisigs that use more than 2300 gas in their fallback function.
+  //  
+  function set_transfer_gas(uint transfer_gas) public onlyOwner {
+    gas = transfer_gas;
+  }
+
+  // We can use this function to move unwanted tokens in the contract
+  function approve_unwanted_tokens(EIP20Token token, address dest, uint value) public onlyOwner {
+    token.approve(dest, value);
+  }
+
+  // This contract is designed to have no balance.
+  // However, we include this function to avoid stuck value by some unknown mishap.
+  function emergency_withdraw() public onlyOwner {
+    require(msg.sender.call.gas(gas).value(this.balance)());
+  }
+
+}
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, refined summary of the issue and why it matters:
+
+1) What’s actually happening  
+   • The contract sends ETH or interacts with tokens via low-level calls (e.g.  
+     major_partner.call.gas(gas).value(major_fee)(),  
+     msg.sender.call.gas(gas).value(this.balance)()  
+     token.approve(...) without checking the return value)  
+   • Low-level CALL never throws on failure—it simply returns false if the callee’s fallback reverts or runs out of gas.
+
+2) Why it’s dangerous  
+   a) Denial-of-Service (DOS) on deposits  
+      – You wrap each partner payment in require(), so if any partner’s fallback reverts (malicious or out-of-gas), you revert the entire deposit.  
+      – A single malicious partner can block everyone from ever depositing again.  
+   b) Stuck funds on emergency withdrawal or token recovery  
+      – Your emergency_withdraw uses a low-level call with a fixed gas stipend; if the owner’s fallback needs more gas, withdraw silently fails under require(), leaving ETH locked.  
+      – Your token recovery doesn’t check token.approve’s return value, so a “false” return means no approval—and the tokens remain stuck.
+
+3) Preconditions for an exploit  
+   • The target address must be a contract, not an EOA.  
+   • Its fallback or receive function must either revert unconditionally or deliberately consume more gas than you forwarded.  
+   • You must be using .call(…) (or similar) without robustly handling the boolean return.
+
+4) How to fix it  
+   • Always check the boolean return of every low-level call:  
+       bool ok = partner.call{gas: g, value: v}();  
+       require(ok, "payment failed");  
+   • Prefer higher-level methods that revert automatically:  
+     – In Solidity <0.6 use address.transfer(amount) (2300 gas)  
+     – In Solidity ≥0.6 use OpenZeppelin’s Address.sendValue(amount)  
+   • For ERC-20 calls always assert the returned bool:  
+       require(token.transfer(to, amount), "ERC20 transfer failed");  
+
+By following these rules you eliminate both the DOS risk (partner-triggered revert) and the silent-failure risk (unchecked .call or token return), ensuring your funds can never get stuck and that failures always bubble up clearly.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+contract Ownable {
+  address public owner;
+
+
+  /** 
+   *
+   * account.
+   */
+  function Ownable() internal {
+    owner = msg.sender;
+  }
+
+
+  /**
+   *
+   */
+  modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+  }
+
+
+  /**
+   *
+   *
+   */
+  function transferOwnership(address newOwner) onlyOwner public {
+    require(newOwner != address(0));
+    owner = newOwner;
+  }
+
+}
+
+/**
+ * Interface for the standard token.
+ * Based on https://github.com/ethereum/EIPs/blob/master/EIPS/eip-20-token-standard.md
+ */
+interface EIP20Token {
+  function totalSupply() external view returns (uint256);
+  function balanceOf(address who) external view returns (uint256);
+  function transfer(address to, uint256 value) external returns (bool success);
+  function transferFrom(address from, address to, uint256 value) external returns (bool success);
+  function approve(address spender, uint256 value) external returns (bool success);
+  function allowance(address owner, address spender) external view returns (uint256 remaining);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+// The owner of this contract should be an externally owned account
+contract HumanProtocolInvestment is Ownable {
+
+  // Address of the target contract
+  address public investment_address = 0x55704E8Cb15AF1054e21a7a59Fb0CBDa6Bd044B7;
+  // Major partner address
+  address public major_partner_address = 0x5a89D9f1C382CaAa66Ee045aeb8510F1205bC8bf;
+  // Minor partner address
+  address public minor_partner_address = 0xC787C3f6F75D7195361b64318CE019f90507f806;
+  // Third partner address
+  address public third_partner_address = 0xDa2cEa3DbaC30835D162Df11D21Ac6Cbf355aC9F;
+  // Additional gas used for transfers.
+  uint public gas = 1000;
+
+  // Payments to this contract require a bit of gas. 100k should be enough.
+  function() payable public {
+    execute_transfer(msg.value);
+  }
+
+  // Transfer some funds to the target investment address.
+  function execute_transfer(uint transfer_amount) internal {
+    // Major fee is 30% * (1/11) * value = 3 * value / (10 * 11)
+    uint major_fee = transfer_amount * 3 / (10 * 11);
+    // Minor fee is 20% * (1/11) * value = 2 * value / (10 * 11)
+    uint minor_fee = transfer_amount * 2 / (10 * 11);
+    // Third fee is 50% * (1/11) * value = 5 * value / (10 * 11)
+    uint third_fee = transfer_amount * 5 / (10 * 11);
+
+    require(major_partner_address.call.gas(gas).value(major_fee)());
+    require(minor_partner_address.call.gas(gas).value(minor_fee)());
+    require(third_partner_address.call.gas(gas).value(third_fee)());
+
+    // Send the rest
+    uint investment_amount = transfer_amount - major_fee - minor_fee - third_fee;
+    require(investment_address.call.gas(gas).value(investment_amount)());
+  }
+
+  // Sets the amount of additional gas allowed to addresses called
+  // @dev This allows transfers to multisigs that use more than 2300 gas in their fallback function.
+  //  
+  function set_transfer_gas(uint transfer_gas) public onlyOwner {
+    gas = transfer_gas;
+  }
+
+  // We can use this function to move unwanted tokens in the contract
+  function approve_unwanted_tokens(EIP20Token token, address dest, uint value) public onlyOwner {
+    token.approve(dest, value);
+  }
+
+  // This contract is designed to have no balance.
+  // However, we include this function to avoid stuck value by some unknown mishap.
+  function emergency_withdraw() public onlyOwner {
+    require(msg.sender.call.gas(gas).value(this.balance)());
+  }
+
+}
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Here is a concise, accurate and complete restatement of the issue, the exploit and the conditions that make it possible—plus the safest remedies.
+
+1) Vulnerable pattern in execute_transfer()  
+   • The contract splits an incoming payment into three “partner fees” and one “investment amount.”  
+   • It pays each partner via  
+       require(partner.call.gas(gas).value(fee)());  
+     before ever recording that those fees were paid or otherwise locking the contract’s state.  
+   • Only after all three partner calls does it forward the leftover to the investment address.  
+   • There is no re-entrancy guard or state flag (“checks‐effects‐interactions” is violated), and the partner addresses are assumed trusted—but they can be contracts.
+
+2) How an attacker exploits this  
+   • The attacker deploys a malicious partner contract with a payable fallback that immediately calls back into the victim:  
+     function() payable { victim.call.value(0)(); }  
+   • A normal user (or the attacker) sends 100 ETH to the victim. Inside execute_transfer():  
+     – major_fee ≈ 2.7272 ETH gets sent first  
+     – control flows into attacker’s fallback *before* any state change or the final 90.9093 ETH is sent to the real investment address  
+     – attacker’s fallback does victim.call.value(0)(), re-entering execute_transfer() mid-flight  
+   • Each re-entry repeats the same sequence of partner .call.value(…) calls, but the final investment transfer is still postponed. By looping or nesting enough re-entries (even with zero-value calls), the attacker can keep the contract from ever completing the “send to investment” step and siphon off more funds.
+
+3) Why this works  
+   • .call.value(...).gas(...) forwards essentially unlimited gas, so the fallback can recurse.  
+   • No mutex or nonReentrant modifier is in place.  
+   • No state update “marks” that fees have already been distributed.  
+   • At least one partner address is a contract under the attacker’s control with a payable fallback.
+
+4) How to fix it  
+   • Follow Checks-Effects-Interactions: update your internal state (e.g. mark fees paid) *before* any external call.  
+   • Use transfer() or send() instead of call.value() if you want to limit the gas forwarded to 2,300 gas (making re-entry much harder).  
+   • Or add a re-entrancy guard (e.g. a bool locked with a nonReentrant modifier) around any function that makes external calls.  
+   • Consider a “pull-over-push” pattern: let recipients withdraw their funds rather than pushing payments inside your main logic.
+
+By moving all state changes ahead of external calls, or by limiting gas/requiring a nonReentrant lock, you close the window that the attacker’s fallback uses to re-enter and hijack the distribution.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.24;
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) returns (bool) {
+    require(_to != address(0));
+
+    // SafeMath.sub will throw if there is not enough balance.
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+
+}
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    require(_to != address(0));
+
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_from] = balances[_from].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+   */
+  function approve(address _spender, uint256 _value) returns (bool) {
+
+    // To change the approve amount you first have to reduce the addresses`
+    //  allowance to zero by calling `approve(_spender, 0)` if it is not
+    //  already 0 to mitigate the race condition described here:
+    //  https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+    require((_value == 0) || (allowed[msg.sender][_spender] == 0));
+
+    allowed[msg.sender][_spender] = _value;
+    Approval(msg.sender, _spender, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Below is a concise, end-to-end explanation of exactly what goes wrong and how an attacker can use it to lock you out of changing your allowance forever:
+
+1) The Offending Code Pattern  
+   In your ERC-20 token’s approve() you have this “zero-or-zero” check meant to avoid the classic race condition:
+   ```
+   function approve(address _spender, uint256 _value) returns (bool) {
+     // Only allow setting a non-zero allowance if the old allowance is zero
+     require(
+       _value == 0
+       || allowed[msg.sender][_spender] == 0
+     );
+
+     allowed[msg.sender][_spender] = _value;
+     Approval(msg.sender, _spender, _value);
+     return true;
+   }
+   ```
+   That means you can never change a non-zero allowance directly to another non-zero value in one call. You must first call `approve(spender, 0)` and then `approve(spender, newValue)`.
+
+2) How an Attacker Freezes Your Allowance  
+   – Assume you originally did `approve(spender, 100)`. The spender can already pull up to 100.  
+   – You now want to bump your allowance to 150. A single call `approve(spender, 150)` will revert (because the old allowance isn’t zero).  
+   – You attempt the two-step approach:
+
+     a) You send `approve(spender, 0)` to zero out the old 100.  
+     b) Before that tx is mined, the spender watches the mempool and frontruns you with `transferFrom(owner, attacker, 1)`, pulling just one token. Now the allowance in the pending state is 99.  
+     c) Your zero-out tx finally executes, but it sets the allowance from 99 to 0. Fine—but the spender has already stolen that one token.  
+     d) You now call `approve(spender, 150)` to set the new allowance—but this reverts again because the contract still sees a *non-zero* old allowance (they only left you 99 before your zero-out).  
+     e) You’re stuck in a loop: every time you try to zero it out again, they pull or top-up allowance by frontrunning, so you never permanently clear the old allowance.
+
+3) Conditions Needed for the Denial-of-Service  
+   • The token uses `require(_value==0 || oldAllowance==0)` in approve.  
+   • The spender already has a non-zero allowance.  
+   • The spender can watch your zero-out tx in the mempool and frontrun with a tiny `transferFrom`.  
+
+Result: You can never move from “some non-zero” allowance to “some new non-zero” allowance, because your zero-out step keeps being subverted. The malicious spender effectively holds your approve list hostage forever.
+
+This is not just a minor inconvenience—it is a permanent denial-of-service on *changing* allowances for that spender.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.24;
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) returns (bool) {
+    require(_to != address(0));
+
+    // SafeMath.sub will throw if there is not enough balance.
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+
+}
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    require(_to != address(0));
+
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_from] = balances[_from].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+   */
+  function approve(address _spender, uint256 _value) returns (bool) {
+
+    // To change the approve amount you first have to reduce the addresses`
+    //  allowance to zero by calling `approve(_spender, 0)` if it is not
+    //  already 0 to mitigate the race condition described here:
+    //  https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+    require((_value == 0) || (allowed[msg.sender][_spender] == 0));
+
+    allowed[msg.sender][_spender] = _value;
+    Approval(msg.sender, _spender, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Below is a concise, end-to-end explanation of exactly what goes wrong and how an attacker can use it to lock you out of changing your allowance forever:
+
+1) The Offending Code Pattern  
+   In your ERC-20 token’s approve() you have this “zero-or-zero” check meant to avoid the classic race condition:
+   ```
+   function approve(address _spender, uint256 _value) returns (bool) {
+     // Only allow setting a non-zero allowance if the old allowance is zero
+     require(
+       _value == 0
+       || allowed[msg.sender][_spender] == 0
+     );
+
+     allowed[msg.sender][_spender] = _value;
+     Approval(msg.sender, _spender, _value);
+     return true;
+   }
+   ```
+   That means you can never change a non-zero allowance directly to another non-zero value in one call. You must first call `approve(spender, 0)` and then `approve(spender, newValue)`.
+
+2) How an Attacker Freezes Your Allowance  
+   – Assume you originally did `approve(spender, 100)`. The spender can already pull up to 100.  
+   – You now want to bump your allowance to 150. A single call `approve(spender, 150)` will revert (because the old allowance isn’t zero).  
+   – You attempt the two-step approach:
+
+     a) You send `approve(spender, 0)` to zero out the old 100.  
+     b) Before that tx is mined, the spender watches the mempool and frontruns you with `transferFrom(owner, attacker, 1)`, pulling just one token. Now the allowance in the pending state is 99.  
+     c) Your zero-out tx finally executes, but it sets the allowance from 99 to 0. Fine—but the spender has already stolen that one token.  
+     d) You now call `approve(spender, 150)` to set the new allowance—but this reverts again because the contract still sees a *non-zero* old allowance (they only left you 99 before your zero-out).  
+     e) You’re stuck in a loop: every time you try to zero it out again, they pull or top-up allowance by frontrunning, so you never permanently clear the old allowance.
+
+3) Conditions Needed for the Denial-of-Service  
+   • The token uses `require(_value==0 || oldAllowance==0)` in approve.  
+   • The spender already has a non-zero allowance.  
+   • The spender can watch your zero-out tx in the mempool and frontrun with a tiny `transferFrom`.  
+
+Result: You can never move from “some non-zero” allowance to “some new non-zero” allowance, because your zero-out step keeps being subverted. The malicious spender effectively holds your approve list hostage forever.
+
+This is not just a minor inconvenience—it is a permanent denial-of-service on *changing* allowances for that spender.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: https://etherscan.io/address/0x5ace17f87c7391e5792a7683069a8025b83bbd85#code
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.13;
+
+library SafeMath {
+  function sub(uint a, uint b) internal returns (uint) {
+    assert(b <= a);
+    return a - b;
+  }
+  function add(uint a, uint b) internal returns (uint) {
+    uint c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+contract ERC20Basic {
+  uint public totalSupply;
+  address public owner; //owner
+  address public animator; //animator
+  function balanceOf(address who) constant returns (uint);
+  function transfer(address to, uint value);
+  event Transfer(address indexed from, address indexed to, uint value);
+  function commitDividend(address who) internal; // pays remaining dividend
+}
+
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint);
+  function transferFrom(address from, address to, uint value);
+  function approve(address spender, uint value);
+  event Approval(address indexed owner, address indexed spender, uint value);
+}
+
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint;
+  mapping(address => uint) balances;
+
+  modifier onlyPayloadSize(uint size) {
+     assert(msg.data.length >= size + 4);
+     _;
+  }
+  /**
+  * @dev transfer token for a specified address
+  * @param _to The address to transfer to.
+  * @param _value The amount to be transferred.
+  */
+  function transfer(address _to, uint _value) onlyPayloadSize(2 * 32) {
+    commitDividend(msg.sender);
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    if(_to == address(this)) {
+        commitDividend(owner);
+        balances[owner] = balances[owner].add(_value);
+        Transfer(msg.sender, owner, _value);
+    }
+    else {
+        commitDividend(_to);
+        balances[_to] = balances[_to].add(_value);
+        Transfer(msg.sender, _to, _value);
+    }
+  }
+  /**
+  * @dev Gets the balance of the specified address.
+  * @param _owner The address to query the the balance of.
+  * @return An uint representing the amount owned by the passed address.
+  */
+  function balanceOf(address _owner) constant returns (uint balance) {
+    return balances[_owner];
+  }
+}
+
+contract StandardToken is BasicToken, ERC20 {
+  mapping (address => mapping (address => uint)) allowed;
+
+  /**
+   * @dev Transfer tokens from one address to another
+   * @param _from address The address which you want to send tokens from
+   * @param _to address The address which you want to transfer to
+   * @param _value uint the amout of tokens to be transfered
+   */
+  function transferFrom(address _from, address _to, uint _value) onlyPayloadSize(3 * 32) {
+    var _allowance = allowed[_from][msg.sender];
+    commitDividend(_from);
+    commitDividend(_to);
+    balances[_to] = balances[_to].add(_value);
+    balances[_from] = balances[_from].sub(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+  }
+  /**
+   * @dev Aprove the passed address to spend the specified amount of tokens on beahlf of msg.sender.
+   * @param _spender The address which will spend the funds.
+   * @param _value The amount of tokens to be spent.
+   */
+  function approve(address _spender, uint _value) {
+    //  https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+    assert(!((_value != 0) && (allowed[msg.sender][_spender] != 0)));
+    allowed[msg.sender][_spender] = _value;
+    Approval(msg.sender, _spender, _value);
+  }
+  /**
+   * @dev Function to check the amount of tokens than an owner allowed to a spender.
+   * @param _owner address The address which owns the funds.
+   * @param _spender address The address which will spend the funds.
+   * @return A uint specifing the amount of tokens still avaible for the spender.
+   */
+  function allowance(address _owner, address _spender) constant returns (uint remaining) {
+    return allowed[_owner][_spender];
+  }
+}
+
+/**
+ * @title SmartBillions contract
+ */
+contract SmartBillions is StandardToken {
+
+    // metadata
+    string public constant name = "SmartBillions Token";
+    string public constant symbol = "PLAY";
+    uint public constant decimals = 0;
+
+    // contract state
+    struct Wallet {
+        uint208 balance; // current balance of user
+    	uint16 lastDividendPeriod; // last processed dividend period of user's tokens
+    	uint32 nextWithdrawBlock; // next withdrawal possible after this block number
+    }
+    mapping (address => Wallet) wallets;
+    struct Bet {
+        uint192 value; // bet size
+        uint32 betHash; // selected numbers
+        uint32 blockNum; // blocknumber when lottery runs
+    }
+    mapping (address => Bet) bets;
+
+    uint public walletBalance = 0; // sum of funds in wallets
+
+    // investment parameters
+    uint public investStart = 1; // investment start block, 0: closed, 1: preparation
+    uint public investBalance = 0; // funding from investors
+    uint public investBalanceMax = 200000 ether; // maximum funding
+    uint public dividendPeriod = 1;
+    uint[] public dividends; // dividens collected per period, growing array
+
+    // betting parameters
+    uint public maxWin = 0; // maximum prize won
+    uint public hashFirst = 0; // start time of building hashes database
+    uint public hashLast = 0; // last saved block of hashes
+    uint public hashNext = 0; // next available bet block.number
+    uint public hashBetSum = 0; // used bet volume of next block
+    uint public hashBetMax = 5 ether; // maximum bet size per block
+    uint[] public hashes; // space for storing lottery results
+
+    // constants
+    //uint public constant hashesSize = 1024 ; // DEBUG ONLY !!!
+    uint public constant hashesSize = 16384 ; // 30 days of blocks
+    uint public coldStoreLast = 0 ; // block of last cold store transfer
+
+    // events
+    event LogBet(address indexed player, uint bethash, uint blocknumber, uint betsize);
+    event LogLoss(address indexed player, uint bethash, uint hash);
+    event LogWin(address indexed player, uint bethash, uint hash, uint prize);
+    event LogInvestment(address indexed investor, address indexed partner, uint amount);
+    event LogRecordWin(address indexed player, uint amount);
+    event LogLate(address indexed player,uint playerBlockNumber,uint currentBlockNumber);
+    event LogDividend(address indexed investor, uint amount, uint period);
+
+    modifier onlyOwner() {
+        assert(msg.sender == owner);
+        _;
+    }
+
+    modifier onlyAnimator() {
+        assert(msg.sender == animator);
+        _;
+    }
+
+    // constructor
+    function SmartBillions() {
+        owner = msg.sender;
+        animator = msg.sender;
+        wallets[owner].lastDividendPeriod = uint16(dividendPeriod);
+        dividends.push(0); // not used
+        dividends.push(0); // current dividend
+    }
+
+/* getters */
+
+    /**
+     * @dev Show length of allocated swap space
+     */
+    function hashesLength() constant external returns (uint) {
+        return uint(hashes.length);
+    }
+
+    /**
+     * @dev Show balance of wallet
+     * @param _owner The address of the account.
+     */
+    function walletBalanceOf(address _owner) constant external returns (uint) {
+        return uint(wallets[_owner].balance);
+    }
+
+    /**
+     * @dev Show last dividend period processed
+     * @param _owner The address of the account.
+     */
+    function walletPeriodOf(address _owner) constant external returns (uint) {
+        return uint(wallets[_owner].lastDividendPeriod);
+    }
+
+    /**
+     * @dev Show block number when withdraw can continue
+     * @param _owner The address of the account.
+     */
+    function walletBlockOf(address _owner) constant external returns (uint) {
+        return uint(wallets[_owner].nextWithdrawBlock);
+    }
+
+    /**
+     * @dev Show bet size.
+     * @param _owner The address of the player.
+     */
+    function betValueOf(address _owner) constant external returns (uint) {
+        return uint(bets[_owner].value);
+    }
+
+    /**
+     * @dev Show block number of lottery run for the bet.
+     * @param _owner The address of the player.
+     */
+    function betHashOf(address _owner) constant external returns (uint) {
+        return uint(bets[_owner].betHash);
+    }
+
+    /**
+     * @dev Show block number of lottery run for the bet.
+     * @param _owner The address of the player.
+     */
+    function betBlockNumberOf(address _owner) constant external returns (uint) {
+        return uint(bets[_owner].blockNum);
+    }
+
+    /**
+     * @dev Print number of block till next expected dividend payment
+     */
+    function dividendsBlocks() constant external returns (uint) {
+        if(investStart > 0) {
+            return(0);
+        }
+        uint period = (block.number - hashFirst) / (10 * hashesSize);
+        if(period > dividendPeriod) {
+            return(0);
+        }
+        return((10 * hashesSize) - ((block.number - hashFirst) % (10 * hashesSize)));
+    }
+
+/* administrative functions */
+
+    /**
+     * @dev Change owner.
+     * @param _who The address of new owner.
+     */
+    function changeOwner(address _who) external onlyOwner {
+        assert(_who != address(0));
+        commitDividend(msg.sender);
+        commitDividend(_who);
+        owner = _who;
+    }
+
+    /**
+     * @dev Change animator.
+     * @param _who The address of new animator.
+     */
+    function changeAnimator(address _who) external onlyAnimator {
+        assert(_who != address(0));
+        commitDividend(msg.sender);
+        commitDividend(_who);
+        animator = _who;
+    }
+
+    /**
+     * @dev Set ICO Start block.
+     * @param _when The block number of the ICO.
+     */
+    function setInvestStart(uint _when) external onlyOwner {
+        require(investStart == 1 && hashFirst > 0 && block.number < _when);
+        investStart = _when;
+    }
+
+    /**
+     * @dev Set maximum bet size per block
+     * @param _maxsum The maximum bet size in wei.
+     */
+    function setBetMax(uint _maxsum) external onlyOwner {
+        hashBetMax = _maxsum;
+    }
+
+    /**
+     * @dev Reset bet size accounting, to increase bet volume above safe limits
+     */
+    function resetBet() external onlyOwner {
+        hashNext = block.number + 3;
+        hashBetSum = 0;
+    }
+
+    /**
+     * @dev Move funds to cold storage
+     * @dev investBalance and walletBalance is protected from withdraw by owner
+     * @dev if funding is > 50% admin can withdraw only 0.25% of balance weakly
+     * @param _amount The amount of wei to move to cold storage
+     */
+    function coldStore(uint _amount) external onlyOwner {
+        houseKeeping();
+        require(_amount > 0 && this.balance >= (investBalance * 9 / 10) + walletBalance + _amount);
+        if(investBalance >= investBalanceMax / 2){ // additional jackpot protection
+            require((_amount <= this.balance / 400) && coldStoreLast + 4 * 60 * 24 * 7 <= block.number);
+        }
+        msg.sender.transfer(_amount);
+        coldStoreLast = block.number;
+    }
+
+    /**
+     * @dev Move funds to contract jackpot
+     */
+    function hotStore() payable external {
+        houseKeeping();
+    }
+
+/* housekeeping functions */
+
+    /**
+     * @dev Update accounting
+     */
+    function houseKeeping() public {
+        if(investStart > 1 && block.number >= investStart + (hashesSize * 5)){ // ca. 14 days
+            investStart = 0; // start dividend payments
+        }
+        else {
+            if(hashFirst > 0){
+		        uint period = (block.number - hashFirst) / (10 * hashesSize );
+                if(period > dividends.length - 2) {
+                    dividends.push(0);
+                }
+                if(period > dividendPeriod && investStart == 0 && dividendPeriod < dividends.length - 1) {
+                    dividendPeriod++;
+                }
+            }
+        }
+    }
+
+/* payments */
+
+    /**
+     * @dev Pay balance from wallet
+     */
+    function payWallet() public {
+        if(wallets[msg.sender].balance > 0 && wallets[msg.sender].nextWithdrawBlock <= block.number){
+            uint balance = wallets[msg.sender].balance;
+            wallets[msg.sender].balance = 0;
+            walletBalance -= balance;
+            pay(balance);
+        }
+    }
+
+    function pay(uint _amount) private {
+        uint maxpay = this.balance / 2;
+        if(maxpay >= _amount) {
+            msg.sender.transfer(_amount);
+            if(_amount > 1 finney) {
+                houseKeeping();
+            }
+        }
+        else {
+            uint keepbalance = _amount - maxpay;
+            walletBalance += keepbalance;
+            wallets[msg.sender].balance += uint208(keepbalance);
+            wallets[msg.sender].nextWithdrawBlock = uint32(block.number + 4 * 60 * 24 * 30); // wait 1 month for more funds
+            msg.sender.transfer(maxpay);
+        }
+    }
+
+/* investment functions */
+
+    /**
+     * @dev Buy tokens
+     */
+    function investDirect() payable external {
+        invest(owner);
+    }
+
+    /**
+     * @dev Buy tokens with affiliate partner
+     * @param _partner Affiliate partner
+     */
+    function invest(address _partner) payable public {
+        //require(fromUSA()==false); // fromUSA() not yet implemented :-(
+        require(investStart > 1 && block.number < investStart + (hashesSize * 5) && investBalance < investBalanceMax);
+        uint investing = msg.value;
+        if(investing > investBalanceMax - investBalance) {
+            investing = investBalanceMax - investBalance;
+            investBalance = investBalanceMax;
+            investStart = 0; // close investment round
+            msg.sender.transfer(msg.value.sub(investing)); // send back funds immediately
+        }
+        else{
+            investBalance += investing;
+        }
+        if(_partner == address(0) || _partner == owner){
+            walletBalance += investing / 10;
+            wallets[owner].balance += uint208(investing / 10);} // 10% for marketing if no affiliates
+        else{
+            walletBalance += (investing * 5 / 100) * 2;
+            wallets[owner].balance += uint208(investing * 5 / 100); // 5% initial marketing funds
+            wallets[_partner].balance += uint208(investing * 5 / 100);} // 5% for affiliates
+        wallets[msg.sender].lastDividendPeriod = uint16(dividendPeriod); // assert(dividendPeriod == 1);
+        uint senderBalance = investing / 10**15;
+        uint ownerBalance = investing * 16 / 10**17  ;
+        uint animatorBalance = investing * 10 / 10**17  ;
+        balances[msg.sender] += senderBalance;
+        balances[owner] += ownerBalance ; // 13% of shares go to developers
+        balances[animator] += animatorBalance ; // 8% of shares go to animator
+        totalSupply += senderBalance + ownerBalance + animatorBalance;
+        Transfer(address(0),msg.sender,senderBalance); // for etherscan
+        Transfer(address(0),owner,ownerBalance); // for etherscan
+        Transfer(address(0),animator,animatorBalance); // for etherscan
+        LogInvestment(msg.sender,_partner,investing);
+    }
+
+    /**
+     * @dev Delete all tokens owned by sender and return unpaid dividends and 90% of initial investment
+     */
+    function disinvest() external {
+        require(investStart == 0);
+        commitDividend(msg.sender);
+        uint initialInvestment = balances[msg.sender] * 10**15;
+        Transfer(msg.sender,address(0),balances[msg.sender]); // for etherscan
+        delete balances[msg.sender]; // totalSupply stays the same, investBalance is reduced
+        investBalance -= initialInvestment;
+        wallets[msg.sender].balance += uint208(initialInvestment * 9 / 10);
+        payWallet();
+    }
+
+    /**
+     * @dev Pay unpaid dividends
+     */
+    function payDividends() external {
+        require(investStart == 0);
+        commitDividend(msg.sender);
+        payWallet();
+    }
+
+    /**
+     * @dev Commit remaining dividends before transfer of tokens
+     */
+    function commitDividend(address _who) internal {
+        uint last = wallets[_who].lastDividendPeriod;
+        if((balances[_who]==0) || (last==0)){
+            wallets[_who].lastDividendPeriod=uint16(dividendPeriod);
+            return;
+        }
+        if(last==dividendPeriod) {
+            return;
+        }
+        uint share = balances[_who] * 0xffffffff / totalSupply;
+        uint balance = 0;
+        for(;last<dividendPeriod;last++) {
+            balance += share * dividends[last];
+        }
+        balance = (balance / 0xffffffff);
+        walletBalance += balance;
+        wallets[_who].balance += uint208(balance);
+        wallets[_who].lastDividendPeriod = uint16(last);
+        LogDividend(_who,balance,last);
+    }
+
+/* lottery functions */
+
+    function betPrize(Bet _player, uint24 _hash) constant private returns (uint) { // house fee 13.85%
+        uint24 bethash = uint24(_player.betHash);
+        uint24 hit = bethash ^ _hash;
+        uint24 matches =
+            ((hit & 0xF) == 0 ? 1 : 0 ) +
+            ((hit & 0xF0) == 0 ? 1 : 0 ) +
+            ((hit & 0xF00) == 0 ? 1 : 0 ) +
+            ((hit & 0xF000) == 0 ? 1 : 0 ) +
+            ((hit & 0xF0000) == 0 ? 1 : 0 ) +
+            ((hit & 0xF00000) == 0 ? 1 : 0 );
+        if(matches == 6){
+            return(uint(_player.value) * 7000000);
+        }
+        if(matches == 5){
+            return(uint(_player.value) * 20000);
+        }
+        if(matches == 4){
+            return(uint(_player.value) * 500);
+        }
+        if(matches == 3){
+            return(uint(_player.value) * 25);
+        }
+        if(matches == 2){
+            return(uint(_player.value) * 3);
+        }
+        return(0);
+    }
+
+    /**
+     * @dev Check if won in lottery
+     */
+    function betOf(address _who) constant external returns (uint)  {
+        Bet memory player = bets[_who];
+        if( (player.value==0) ||
+            (player.blockNum<=1) ||
+            (block.number<player.blockNum) ||
+            (block.number>=player.blockNum + (10 * hashesSize))){
+            return(0);
+        }
+        if(block.number<player.blockNum+256){
+            
+            return(betPrize(player,uint24(block.blockhash(player.blockNum))));
+        }
+        if(hashFirst>0){
+            uint32 hash = getHash(player.blockNum);
+            if(hash == 0x1000000) { // load hash failed :-(, return funds
+                return(uint(player.value));
+            }
+            else{
+                return(betPrize(player,uint24(hash)));
+            }
+	}
+        return(0);
+    }
+
+    /**
+     * @dev Check if won in lottery
+     */
+    function won() public {
+        Bet memory player = bets[msg.sender];
+        if(player.blockNum==0){ // create a new player
+            bets[msg.sender] = Bet({value: 0, betHash: 0, blockNum: 1});
+            return;
+        }
+        if((player.value==0) || (player.blockNum==1)){
+            payWallet();
+            return;
+        }
+        require(block.number>player.blockNum); // if there is an active bet, throw()
+        if(player.blockNum + (10 * hashesSize) <= block.number){ // last bet too long ago, lost !
+            LogLate(msg.sender,player.blockNum,block.number);
+            bets[msg.sender] = Bet({value: 0, betHash: 0, blockNum: 1});
+            return;
+        }
+        uint prize = 0;
+        uint32 hash = 0;
+        if(block.number<player.blockNum+256){
+            
+            hash = uint24(block.blockhash(player.blockNum));
+            prize = betPrize(player,uint24(hash));
+        }
+        else {
+            if(hashFirst>0){ // lottery is open even before swap space (hashes) is ready, but player must collect results within 256 blocks after run
+                hash = getHash(player.blockNum);
+                if(hash == 0x1000000) { // load hash failed :-(, return funds
+                    prize = uint(player.value);
+                }
+                else{
+                    prize = betPrize(player,uint24(hash));
+                }
+	    }
+            else{
+                LogLate(msg.sender,player.blockNum,block.number);
+                bets[msg.sender] = Bet({value: 0, betHash: 0, blockNum: 1});
+                return();
+            }
+        }
+        bets[msg.sender] = Bet({value: 0, betHash: 0, blockNum: 1});
+        if(prize>0) {
+            LogWin(msg.sender,uint(player.betHash),uint(hash),prize);
+            if(prize > maxWin){
+                maxWin = prize;
+                LogRecordWin(msg.sender,prize);
+            }
+            pay(prize);
+        }
+        else{
+            LogLoss(msg.sender,uint(player.betHash),uint(hash));
+        }
+    }
+
+    /**
+     * @dev Send ether to buy tokens during ICO
+     * @dev or send less than 1 ether to contract to play
+     * @dev or send 0 to collect prize
+     */
+    function () payable external {
+        if(msg.value > 0){
+            if(investStart>1){ // during ICO payment to the contract is treated as investment
+                invest(owner);
+            }
+            else{ // if not ICO running payment to contract is treated as play
+                play();
+            }
+            return;
+        }
+        //check for dividends and other assets
+        if(investStart == 0 && balances[msg.sender]>0){
+            commitDividend(msg.sender);}
+        won(); // will run payWallet() if nothing else available
+    }
+
+    /**
+     * @dev Play in lottery
+     */
+    function play() payable public returns (uint) {
+        return playSystem(uint(sha3(msg.sender,block.number)), address(0));
+    }
+
+    /**
+     * @dev Play in lottery with random numbers
+     * @param _partner Affiliate partner
+     */
+    function playRandom(address _partner) payable public returns (uint) {
+        return playSystem(uint(sha3(msg.sender,block.number)), _partner);
+    }
+
+    /**
+     * @dev Play in lottery with own numbers
+     * @param _partner Affiliate partner
+     */
+    function playSystem(uint _hash, address _partner) payable public returns (uint) {
+        won(); // check if player did not win
+        uint24 bethash = uint24(_hash);
+        require(msg.value <= 1 ether && msg.value < hashBetMax);
+        if(msg.value > 0){
+            if(investStart==0) { // dividends only after investment finished
+                dividends[dividendPeriod] += msg.value / 20; // 5% dividend
+            }
+            if(_partner != address(0)) {
+                uint fee = msg.value / 100;
+                walletBalance += fee;
+                wallets[_partner].balance += uint208(fee); // 1% for affiliates
+            }
+            if(hashNext < block.number + 3) {
+                hashNext = block.number + 3;
+                hashBetSum = msg.value;
+            }
+            else{
+                if(hashBetSum > hashBetMax) {
+                    hashNext++;
+                    hashBetSum = msg.value;
+                }
+                else{
+                    hashBetSum += msg.value;
+                }
+            }
+            bets[msg.sender] = Bet({value: uint192(msg.value), betHash: uint32(bethash), blockNum: uint32(hashNext)});
+            LogBet(msg.sender,uint(bethash),hashNext,msg.value);
+        }
+        putHash(); // players help collecing data
+        return(hashNext);
+    }
+
+/* database functions */
+
+    /**
+     * @dev Create hash data swap space
+     * @param _sadd Number of hashes to add (<=256)
+     */
+    function addHashes(uint _sadd) public returns (uint) {
+        require(hashFirst == 0 && _sadd > 0 && _sadd <= hashesSize);
+        uint n = hashes.length;
+        if(n + _sadd > hashesSize){
+            hashes.length = hashesSize;
+        }
+        else{
+            hashes.length += _sadd;
+        }
+        for(;n<hashes.length;n++){ // make sure to burn gas
+            hashes[n] = 1;
+        }
+        if(hashes.length>=hashesSize) { // assume block.number > 10
+            hashFirst = block.number - ( block.number % 10);
+            hashLast = hashFirst;
+        }
+        return(hashes.length);
+    }
+
+    /**
+     * @dev Create hash data swap space, add 128 hashes
+     */
+    function addHashes128() external returns (uint) {
+        return(addHashes(128));
+    }
+
+    function calcHashes(uint32 _lastb, uint32 _delta) constant private returns (uint) {
+        
+        return( ( uint(block.blockhash(_lastb  )) & 0xFFFFFF )
+        
+            | ( ( uint(block.blockhash(_lastb+1)) & 0xFFFFFF ) << 24 )
+            
+            | ( ( uint(block.blockhash(_lastb+2)) & 0xFFFFFF ) << 48 )
+            
+            | ( ( uint(block.blockhash(_lastb+3)) & 0xFFFFFF ) << 72 )
+            
+            | ( ( uint(block.blockhash(_lastb+4)) & 0xFFFFFF ) << 96 )
+            
+            | ( ( uint(block.blockhash(_lastb+5)) & 0xFFFFFF ) << 120 )
+            
+            | ( ( uint(block.blockhash(_lastb+6)) & 0xFFFFFF ) << 144 )
+            
+            | ( ( uint(block.blockhash(_lastb+7)) & 0xFFFFFF ) << 168 )
+            
+            | ( ( uint(block.blockhash(_lastb+8)) & 0xFFFFFF ) << 192 )
+            
+            | ( ( uint(block.blockhash(_lastb+9)) & 0xFFFFFF ) << 216 )
+            | ( ( uint(_delta) / hashesSize) << 240));
+    }
+
+    function getHash(uint _block) constant private returns (uint32) {
+        uint delta = (_block - hashFirst) / 10;
+        uint hash = hashes[delta % hashesSize];
+        if(delta / hashesSize != hash >> 240) {
+            return(0x1000000); // load failed, incorrect data in hashes
+        }
+        uint slotp = (_block - hashFirst) % 10;
+        return(uint32((hash >> (24 * slotp)) & 0xFFFFFF));
+    }
+
+    /**
+     * @dev Fill hash data
+     */
+    function putHash() public returns (bool) {
+        uint lastb = hashLast;
+        if(lastb == 0 || block.number <= lastb + 10) {
+            return(false);
+        }
+        uint blockn256;
+        if(block.number<256) { // useless test for testnet :-(
+            blockn256 = 0;
+        }
+        else{
+            blockn256 = block.number - 256;
+        }
+        if(lastb < blockn256) {
+            uint num = blockn256;
+            num += num % 10;
+            lastb = num;
+        }
+        uint delta = (lastb - hashFirst) / 10;
+        hashes[delta % hashesSize] = calcHashes(uint32(lastb),uint32(delta));
+        hashLast = lastb + 10;
+        return(true);
+    }
+
+    /**
+     * @dev Fill hash data many times
+     * @param _num Number of iterations
+     */
+    function putHashes(uint _num) external {
+        uint n=0;
+        for(;n<_num;n++){
+            if(!putHash()){
+                return;
+            }
+        }
+    }
+
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (arithmetic)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (denial_of_service)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

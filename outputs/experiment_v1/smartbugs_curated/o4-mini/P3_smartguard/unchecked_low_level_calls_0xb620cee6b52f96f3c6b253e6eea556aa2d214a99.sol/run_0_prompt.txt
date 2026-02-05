@@ -1,0 +1,1123 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Edgeless Casino Proxy Contract. Serves as a proxy for game functionality.
+ * Allows the players to deposit and withdraw funds.
+ * Allows authorized addresses to make game transactions.
+ * author: Julia Altenried
+ **/
+
+pragma solidity ^0.4.17;
+
+
+contract token {
+	function transferFrom(address sender, address receiver, uint amount) public returns(bool success) {}
+	
+	function transfer(address receiver, uint amount) public returns(bool success) {}
+	
+	function balanceOf(address holder) public constant returns(uint) {}
+}
+
+contract owned {
+  address public owner;
+  modifier onlyOwner {
+    require(msg.sender == owner);
+    _;
+  }
+
+  function owned() public{
+    owner = msg.sender;
+  }
+
+  function changeOwner(address newOwner) onlyOwner public{
+    owner = newOwner;
+  }
+}
+
+contract safeMath {
+	//internals
+	function safeSub(uint a, uint b) constant internal returns(uint) {
+		assert(b <= a);
+		return a - b;
+	}
+
+	function safeAdd(uint a, uint b) constant internal returns(uint) {
+		uint c = a + b;
+		assert(c >= a && c >= b);
+		return c;
+	}
+	
+	function safeMul(uint a, uint b) constant internal returns (uint) {
+    uint c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+}
+
+contract casinoBank is owned, safeMath{
+	/** the total balance of all players with 4 virtual decimals **/
+	uint public playerBalance;
+	/** the balance per player in edgeless tokens with 4 virtual decimals */
+  mapping(address=>uint) public balanceOf;
+	/** in case the user wants/needs to call the withdraw function from his own wallet, he first needs to request a withdrawal */
+	mapping(address=>uint) public withdrawAfter;
+	/** the price per kgas in tokens (4 decimals) */
+	uint public gasPrice = 20;
+	/** the edgeless token contract */
+	token edg;
+	/** owner should be able to close the contract is nobody has been using it for at least 30 days */
+	uint public closeAt;
+	/** informs listeners how many tokens were deposited for a player */
+	event Deposit(address _player, uint _numTokens, bool _chargeGas);
+	/** informs listeners how many tokens were withdrawn from the player to the receiver address */
+	event Withdrawal(address _player, address _receiver, uint _numTokens);
+	
+	function casinoBank(address tokenContract) public{
+		edg = token(tokenContract);
+	}
+	
+	/**
+	* accepts deposits for an arbitrary address.
+	* retrieves tokens from the message sender and adds them to the balance of the specified address.
+	* edgeless tokens do not have any decimals, but are represented on this contract with 4 decimals.
+	*
+	*        numTokens number of tokens to deposit (0 decimals)
+	*				 chargeGas indicates if the gas cost is subtracted from the user's edgeless token balance
+	**/
+	function deposit(address receiver, uint numTokens, bool chargeGas) public isAlive{
+		require(numTokens > 0);
+		uint value = safeMul(numTokens,10000); 
+		if(chargeGas) value = safeSub(value, msg.gas/1000 * gasPrice);
+		assert(edg.transferFrom(msg.sender, address(this), numTokens));
+		balanceOf[receiver] = safeAdd(balanceOf[receiver], value);
+		playerBalance = safeAdd(playerBalance, value);
+		Deposit(receiver, numTokens, chargeGas);
+  }
+	
+	/**
+	* If the user wants/needs to withdraw his funds himself, he needs to request the withdrawal first.
+	* This method sets the earliest possible withdrawal date to 7 minutes from now. 
+	* Reason: The user should not be able to withdraw his funds, while the the last game methods have not yet been mined.
+	**/
+	function requestWithdrawal() public{
+		withdrawAfter[msg.sender] = now + 7 minutes;
+	}
+	
+	/**
+	* In case the user requested a withdrawal and changes his mind.
+	* Necessary to be able to continue playing.
+	**/
+	function cancelWithdrawalRequest() public{
+		withdrawAfter[msg.sender] = 0;
+	}
+	
+	/**
+	* withdraws an amount from the user balance if 7 minutes passed since the request.
+	*
+	**/
+	function withdraw(uint amount) public keepAlive{
+		require(withdrawAfter[msg.sender]>0 && n
+```
+
+**Security Analysis:**
+Below is a concise, self-contained summary of the issues in the `deposit()`/`withdraw()` logic, why they matter, and how an attacker—or simply a broken token—can turn them into a denial-of-service or funds-loss scenario.
+
+1. Deposit workflow (simplified)  
+   • User calls deposit(value, chargeGasInTokens)  
+   • If `chargeGasInTokens` is true, the code does:
+       fee = (msg.gas / 1000) * gasPrice  
+       value = value – fee  
+     (all using SafeMath)  
+   • assert(edg.transferFrom(msg.sender, this, value))  
+   • balances[msg.sender] += value  
+   • playerBalance += value  
+
+2. Key vulnerability #1: Using `msg.gas` to charge token fees  
+   – `msg.gas` reports *remaining* gas, not *used* gas. An attacker can manipulate the gas left at that point by:  
+     • Changing the `chargeGasInTokens` flag  
+     • Using unusual gas stipends in the prior call  
+   – Consequences:  
+     1. The computed `fee` can wildly overstate or understate the intended gas cost.  
+     2. In extreme cases, `value – fee` underflows → SafeMath throws → entire deposit reverts.  
+     3. Even without an underflow, honest users can be massively overcharged if they don’t predict how much gas remains.  
+
+3. Key vulnerability #2: `assert` on an external token call  
+   – Standard ERC-20 `transferFrom` returns false on failure, but doesn’t revert.  
+   – The contract does `assert(edg.transferFrom(...))`.  
+     • If `transferFrom` returns false → `assert(false)` → *invalid opcode* → all remaining gas is consumed.  
+     • If `transferFrom` itself reverts or throws → also bubbles up as invalid opcode.  
+   – Consequence: A malicious or broken ERC-20 token can make *every* deposit call revert with no refund of gas to the user or forwarding to fallback recovery. Over time this becomes a full DoS on deposits.  
+
+4. Why reentrancy and overflows are NOT the main issue here  
+   – All arithmetic (except the flawed fee subtraction) uses SafeMath, so classic overflow/underflow is contained.  
+   – State updates occur before the external `transferFrom`/`transfer`, so even a reentrant token contract can’t reenter into an inconsistent state on your contract.  
+
+5. Conditions for exploitation  
+   a) Denial-of-Service via malicious/broken token:  
+      – Deploy a token whose `transferFrom` always returns false (or always reverts).  
+      – Point the proxy’s `edg` reference at that token.  
+      – Now every deposit call hits `assert(false)` → DoS.  
+   b) Arbitrary user underflow or over-charging:  
+      – A user flips the `chargeGasInTokens` flag on deposit and crafts a transaction with just enough or very little gas remaining at that branch.  
+      – The fee calculation underflows (or grossly over-charges) → transaction reverts or user loses unexpected token value.  
+
+6. Remediation suggestions  
+   – Never use `msg.gas` for accounting. If you want to charge for gas, you must measure gas *used* (e.g. via gas-start/gas-end snapshots) or impose a fixed fee.  
+   – Replace `assert(edg.transferFrom(...))` with `require(edg.transferFrom(...), "Transfer failed")`. That way a false return only reverts the user’s call and refunds the remainder of the gas, rather than consuming it all in an invalid opcode.  
+
+Final verdict:  
+VULNERABLE  
+Categories:  
+  • denial_of_service (malicious/broken token can break all deposits)  
+  • arithmetic (misuse of msg.gas leads to underflow/over-charge)  
+  • unchecked_low_level_calls (assert on external ERC-20 call)
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Edgeless Casino Proxy Contract. Serves as a proxy for game functionality.
+ * Allows the players to deposit and withdraw funds.
+ * Allows authorized addresses to make game transactions.
+ * author: Julia Altenried
+ **/
+
+pragma solidity ^0.4.17;
+
+
+contract token {
+	function transferFrom(address sender, address receiver, uint amount) public returns(bool success) {}
+	
+	function transfer(address receiver, uint amount) public returns(bool success) {}
+	
+	function balanceOf(address holder) public constant returns(uint) {}
+}
+
+contract owned {
+  address public owner;
+  modifier onlyOwner {
+    require(msg.sender == owner);
+    _;
+  }
+
+  function owned() public{
+    owner = msg.sender;
+  }
+
+  function changeOwner(address newOwner) onlyOwner public{
+    owner = newOwner;
+  }
+}
+
+contract safeMath {
+	//internals
+	function safeSub(uint a, uint b) constant internal returns(uint) {
+		assert(b <= a);
+		return a - b;
+	}
+
+	function safeAdd(uint a, uint b) constant internal returns(uint) {
+		uint c = a + b;
+		assert(c >= a && c >= b);
+		return c;
+	}
+	
+	function safeMul(uint a, uint b) constant internal returns (uint) {
+    uint c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+}
+
+contract casinoBank is owned, safeMath{
+	/** the total balance of all players with 4 virtual decimals **/
+	uint public playerBalance;
+	/** the balance per player in edgeless tokens with 4 virtual decimals */
+  mapping(address=>uint) public balanceOf;
+	/** in case the user wants/needs to call the withdraw function from his own wallet, he first needs to request a withdrawal */
+	mapping(address=>uint) public withdrawAfter;
+	/** the price per kgas in tokens (4 decimals) */
+	uint public gasPrice = 4;
+	/** the average amount of gas consumend per game **/
+	mapping(address=>uint) public avgGas;
+	/** the edgeless token contract */
+	token edg;
+	/** owner should be able to close the contract is nobody has been using it for at least 30 days */
+	uint public closeAt;
+	/** informs listeners how many tokens were deposited for a player */
+	event Deposit(address _player, uint _numTokens, bool _chargeGas);
+	/** informs listeners how many tokens were withdrawn from the player to the receiver address */
+	event Withdrawal(address _player, address _receiver, uint _numTokens);
+	
+	function casinoBank(address tokenContract) public{
+		edg = token(tokenContract);
+	}
+	
+	/**
+	* accepts deposits for an arbitrary address.
+	* retrieves tokens from the message sender and adds them to the balance of the specified address.
+	* edgeless tokens do not have any decimals, but are represented on this contract with 4 decimals.
+	*
+	*        numTokens number of tokens to deposit (0 decimals)
+	*				 chargeGas indicates if the gas cost is subtracted from the user's edgeless token balance
+	**/
+	function deposit(address receiver, uint numTokens, bool chargeGas) public isAlive{
+		require(numTokens > 0);
+		uint value = safeMul(numTokens,10000); 
+		if(chargeGas) value = safeSub(value, msg.gas/1000 * gasPrice);
+		assert(edg.transferFrom(msg.sender, address(this), numTokens));
+		balanceOf[receiver] = safeAdd(balanceOf[receiver], value);
+		playerBalance = safeAdd(playerBalance, value);
+		Deposit(receiver, numTokens, chargeGas);
+  }
+	
+	/**
+	* If the user wants/needs to withdraw his funds himself, he needs to request the withdrawal first.
+	* This method sets the earliest possible withdrawal date to 7 minutes from now. 
+	* Reason: The user should not be able to withdraw his funds, while the the last game methods have not yet been mined.
+	**/
+	function requestWithdrawal() public{
+		withdrawAfter[msg.sender] = now + 7 minutes;
+	}
+	
+	/**
+	* In case the user requested a withdrawal and changes his mind.
+	* Necessary to be able to continue playing.
+	**/
+	function cancelWithdrawalRequest() public{
+		withdrawAfter[msg.sender] = 0;
+	}
+	
+	/**
+	* withdraws an amount from the user balance if 7 minutes passed since the request.
+	*
+	**/
+
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Yes – your write-up correctly pinpoints the bug, explains exactly how an attacker can abuse it, and lays out the necessary preconditions. Here’s a polished, concise version:
+
+1. Vulnerable code pattern  
+   • In withdraw(), you first deduct the user’s balance:  
+       balanceOf[msg.sender]    -= numTokens * 10⁴;  
+       playerBalance            -= numTokens * 10⁴;  
+   • Immediately after, you call the token:  
+       edg.transfer(msg.sender, numTokens);  
+   • You never do:  
+       require(edg.transfer(...));  
+     so if transfer() returns false the call silently “succeeds” from Solidity’s point of view.
+
+2. Attack vector  
+   • An attacker (or simply a malicious token deployer) points your proxy’s edg address at a token contract whose transfer() always returns false.  
+   • When any user invokes withdraw(), your contract:  
+     – Updates its internal balances down to reflect the withdrawal  
+     – Calls edg.transfer(...), which returns false  
+     – Doesn’t revert, because you never check the return value  
+     – Emits the event Withdrawal(...) and finishes  
+   • Result: no tokens leave the contract, but the user’s on-chain balance has already been reduced—tokens are now irretrievably “stuck” inside.
+
+3. Preconditions for exploitation  
+   • You make an external call to edg.transfer without wrapping it in require/​assert  
+   • The ERC-20 standard permits transfer() to return false on failure instead of reverting  
+   • A malicious or non-standard token can exploit this by always returning false
+
+4. Recommended fix  
+   • Always check the return value of external token calls:  
+       require(edg.transfer(msg.sender, numTokens), “Transfer failed”);  
+   • Better yet, use OpenZeppelin’s SafeERC20 which wraps and verifies calls under the hood.
+
+Take-away: never fire off low-level or external calls without immediately checking their success. This alone closes the unchecked-low-level-calls vulnerability.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Edgeless Casino Proxy Contract. Serves as a proxy for game functionality.
+ * Allows the players to deposit and withdraw funds.
+ * Allows authorized addresses to make game transactions.
+ * author: Julia Altenried
+ **/
+
+pragma solidity ^0.4.17;
+
+
+contract token {
+	function transferFrom(address sender, address receiver, uint amount) public returns(bool success) {}
+	
+	function transfer(address receiver, uint amount) public returns(bool success) {}
+	
+	function balanceOf(address holder) public constant returns(uint) {}
+}
+
+contract owned {
+  address public owner;
+  modifier onlyOwner {
+    require(msg.sender == owner);
+    _;
+  }
+
+  function owned() public{
+    owner = msg.sender;
+  }
+
+  function changeOwner(address newOwner) onlyOwner public{
+    owner = newOwner;
+  }
+}
+
+contract safeMath {
+	//internals
+	function safeSub(uint a, uint b) constant internal returns(uint) {
+		assert(b <= a);
+		return a - b;
+	}
+
+	function safeAdd(uint a, uint b) constant internal returns(uint) {
+		uint c = a + b;
+		assert(c >= a && c >= b);
+		return c;
+	}
+	
+	function safeMul(uint a, uint b) constant internal returns (uint) {
+    uint c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+}
+
+contract casinoBank is owned, safeMath{
+	/** the total balance of all players with 4 virtual decimals **/
+	uint public playerBalance;
+	/** the balance per player in edgeless tokens with 4 virtual decimals */
+  mapping(address=>uint) public balanceOf;
+	/** in case the user wants/needs to call the withdraw function from his own wallet, he first needs to request a withdrawal */
+	mapping(address=>uint) public withdrawAfter;
+	/** the price per kgas in tokens (4 decimals) */
+	uint public gasPrice = 4;
+	/** the average amount of gas consumend per game **/
+	mapping(address=>uint) public avgGas;
+	/** the edgeless token contract */
+	token edg;
+	/** owner should be able to close the contract is nobody has been using it for at least 30 days */
+	uint public closeAt;
+	/** informs listeners how many tokens were deposited for a player */
+	event Deposit(address _player, uint _numTokens, bool _chargeGas);
+	/** informs listeners how many tokens were withdrawn from the player to the receiver address */
+	event Withdrawal(address _player, address _receiver, uint _numTokens);
+	
+	function casinoBank(address tokenContract) public{
+		edg = token(tokenContract);
+	}
+	
+	/**
+	* accepts deposits for an arbitrary address.
+	* retrieves tokens from the message sender and adds them to the balance of the specified address.
+	* edgeless tokens do not have any decimals, but are represented on this contract with 4 decimals.
+	*
+	*        numTokens number of tokens to deposit (0 decimals)
+	*				 chargeGas indicates if the gas cost is subtracted from the user's edgeless token balance
+	**/
+	function deposit(address receiver, uint numTokens, bool chargeGas) public isAlive{
+		require(numTokens > 0);
+		uint value = safeMul(numTokens,10000); 
+		if(chargeGas) value = safeSub(value, msg.gas/1000 * gasPrice);
+		assert(edg.transferFrom(msg.sender, address(this), numTokens));
+		balanceOf[receiver] = safeAdd(balanceOf[receiver], value);
+		playerBalance = safeAdd(playerBalance, value);
+		Deposit(receiver, numTokens, chargeGas);
+  }
+	
+	/**
+	* If the user wants/needs to withdraw his funds himself, he needs to request the withdrawal first.
+	* This method sets the earliest possible withdrawal date to 7 minutes from now. 
+	* Reason: The user should not be able to withdraw his funds, while the the last game methods have not yet been mined.
+	**/
+	function requestWithdrawal() public{
+		withdrawAfter[msg.sender] = now + 7 minutes;
+	}
+	
+	/**
+	* In case the user requested a withdrawal and changes his mind.
+	* Necessary to be able to continue playing.
+	**/
+	function cancelWithdrawalRequest() public{
+		withdrawAfter[msg.sender] = 0;
+	}
+	
+	/**
+	* withdraws an amount from the user balance if 7 minutes passed since the request.
+	*
+	**/
+
+```
+
+**Security Analysis:**
+Here’s a concise, final explanation of what’s wrong, how it can be exploited, and under what conditions:
+
+1. Vulnerable Pattern  
+   • The deposit() function does an external call to ERC-20’s transferFrom() before it updates its own bookkeeping (balanceOf and playerBalance).  
+   • If the token at address edg is a malicious contract, its transferFrom() can reenter back into deposit() (or another entry point) and manipulate balances before the first call finishes.  
+   • Because the contract only updates its internal state after the external call, an attacker can credit themselves multiple times with the same tokens.
+
+2. Attack Outline (Reentrancy)  
+   a. Attacker deploys a malicious token contract with transferFrom() overridden.  
+   b. User (or attacker) calls casinoBank.deposit(…), causing casinoBank to call maliciousToken.transferFrom(...).  
+   c. In that transferFrom(), the malicious token calls casinoBank.deposit(...) again (reenter).  
+   d. On the reentrant call, the casinoBank still thinks the user has zero deposited (since balanceOf wasn’t updated yet), so it “accepts” the second transferFrom call.  
+   e. After all recursive calls return, the contract finally updates balanceOf only once—letting the attacker pull out far more than they actually deposited.
+
+3. Other Weaknesses in the Same Code  
+   • Using msg.gas to calculate a “gas fee” is unsafe and manipulable, and can underflow if msg.gas is larger than expected.  
+   • Relying on assert(transferFrom(...)) will consume all remaining gas on failure (invalid opcode), rather than cleanly revert.  
+
+4. Conditions for Exploitation  
+   • The token at edg must behave maliciously (i.e., its transferFrom must call back into casinoBank).  
+   • No reentrancy guard or mutex is in place, and internal balances are updated only after the external call returns.
+
+5. Mitigation  
+   • Move all state‐updates (balanceOf and playerBalance) before any external call.  
+   • Consider adding a nonReentrant modifier.  
+   • Stop using msg.gas for fee calculations; use msg.value or explicitly passed parameters if you need to meter usage.  
+   • Replace assert(...) on external calls with require(...), so failures revert cleanly.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ * Edgeless Casino Proxy Contract. Serves as a proxy for game functionality.
+ * Allows the players to deposit and withdraw funds.
+ * Allows authorized addresses to make game transactions.
+ * author: Julia Altenried
+ **/
+
+pragma solidity ^0.4.17;
+
+
+contract token {
+	function transferFrom(address sender, address receiver, uint amount) public returns(bool success) {}
+	
+	function transfer(address receiver, uint amount) public returns(bool success) {}
+	
+	function balanceOf(address holder) public constant returns(uint) {}
+}
+
+contract owned {
+  address public owner;
+  modifier onlyOwner {
+    require(msg.sender == owner);
+    _;
+  }
+
+  function owned() public{
+    owner = msg.sender;
+  }
+
+  function changeOwner(address newOwner) onlyOwner public{
+    owner = newOwner;
+  }
+}
+
+contract safeMath {
+	//internals
+	function safeSub(uint a, uint b) constant internal returns(uint) {
+		assert(b <= a);
+		return a - b;
+	}
+
+	function safeAdd(uint a, uint b) constant internal returns(uint) {
+		uint c = a + b;
+		assert(c >= a && c >= b);
+		return c;
+	}
+	
+	function safeMul(uint a, uint b) constant internal returns (uint) {
+    uint c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+}
+
+contract casinoBank is owned, safeMath{
+	/** the total balance of all players with 4 virtual decimals **/
+	uint public playerBalance;
+	/** the balance per player in edgeless tokens with 4 virtual decimals */
+  mapping(address=>uint) public balanceOf;
+	/** in case the user wants/needs to call the withdraw function from his own wallet, he first needs to request a withdrawal */
+	mapping(address=>uint) public withdrawAfter;
+	/** the price per kgas in tokens (4 decimals) */
+	uint public gasPrice = 20;
+	/** the edgeless token contract */
+	token edg;
+	/** owner should be able to close the contract is nobody has been using it for at least 30 days */
+	uint public closeAt;
+	/** informs listeners how many tokens were deposited for a player */
+	event Deposit(address _player, uint _numTokens, bool _chargeGas);
+	/** informs listeners how many tokens were withdrawn from the player to the receiver address */
+	event Withdrawal(address _player, address _receiver, uint _numTokens);
+	
+	function casinoBank(address tokenContract) public{
+		edg = token(tokenContract);
+	}
+	
+	/**
+	* accepts deposits for an arbitrary address.
+	* retrieves tokens from the message sender and adds them to the balance of the specified address.
+	* edgeless tokens do not have any decimals, but are represented on this contract with 4 decimals.
+	*
+	*        numTokens number of tokens to deposit (0 decimals)
+	*				 chargeGas indicates if the gas cost is subtracted from the user's edgeless token balance
+	**/
+	function deposit(address receiver, uint numTokens, bool chargeGas) public isAlive{
+		require(numTokens > 0);
+		uint value = safeMul(numTokens,10000); 
+		if(chargeGas) value = safeSub(value, msg.gas/1000 * gasPrice);
+		assert(edg.transferFrom(msg.sender, address(this), numTokens));
+		balanceOf[receiver] = safeAdd(balanceOf[receiver], value);
+		playerBalance = safeAdd(playerBalance, value);
+		Deposit(receiver, numTokens, chargeGas);
+  }
+	
+	/**
+	* If the user wants/needs to withdraw his funds himself, he needs to request the withdrawal first.
+	* This method sets the earliest possible withdrawal date to 7 minutes from now. 
+	* Reason: The user should not be able to withdraw his funds, while the the last game methods have not yet been mined.
+	**/
+	function requestWithdrawal() public{
+		withdrawAfter[msg.sender] = now + 7 minutes;
+	}
+	
+	/**
+	* In case the user requested a withdrawal and changes his mind.
+	* Necessary to be able to continue playing.
+	**/
+	function cancelWithdrawalRequest() public{
+		withdrawAfter[msg.sender] = 0;
+	}
+	
+	/**
+	* withdraws an amount from the user balance if 7 minutes passed since the request.
+	*
+	**/
+	function withdraw(uint amount) public keepAlive{
+		require(withdrawAfter[msg.sender]>0 && n
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, accurate, and complete description of the issue, why it’s dangerous, how it can be exploited, and how to fix it.
+
+1) Vulnerable pattern  
+   • In the `withdraw(...)` function you do:  
+     • update your internal balances (`balanceOf[msg.sender]` and `playerBalance`)  
+     • then call `edg.transfer(msg.sender, amount);` without checking its return value  
+     • emit `Withdrawal(msg.sender, msg.sender, amount)`  
+   • You assume `edg.transfer(...)` always succeeds, but ERC-20’s `transfer` returns a `bool` to signal success/failure.
+
+2) Why this is dangerous  
+   • If `edg.transfer(...)` fails (returns `false` rather than reverting), your contract:  
+     – Does **not** revert or refund the user  
+     – Still considers the withdrawal “done” (it has already subtracted the user’s balance)  
+     – Leaves the tokens locked in the token contract or lost  
+     – Leaves your bookkeeping out of sync with reality
+
+3) How an attacker (or a buggy token) can exploit it  
+   • A malicious or mis-configured token contract might implement `transfer` so that it returns `false` on certain conditions (e.g. blacklisted addresses, paused transfers, insufficient allowance in a wrapper token, etc.)  
+   • A user calls `withdraw(amount)` expecting to receive their tokens  
+   • Your contract debits their casino balance, calls `edg.transfer(...)`, sees `false`, but does nothing  
+   • User’s internal balance is now zero, they walk away empty-handed, and the tokens remain locked forever
+
+4) Conditions that enable this exploit  
+   • You rely on an external call that returns a `bool` success flag  
+   • You never check that flag (`if (!edg.transfer(...)) revert();` or `require(edg.transfer(...));`)  
+   • The external call can fail **silently** by returning `false` instead of reverting
+
+5) The fix  
+   • Always check return values of ERC-20 token calls. For example:  
+     ```  
+     require(edg.transfer(msg.sender, amount), "EDG transfer failed");  
+     ```  
+   • Or better yet, use OpenZeppelin’s SafeERC20 library:  
+     ```  
+     using SafeERC20 for IERC20;  
+     edg.safeTransfer(msg.sender, amount);  
+     ```  
+   This ensures that any failure in the token transfer reverts your `withdraw` and keeps your bookkeeping consistent.
+
+Summary  
+Unchecked low-level calls to tokens that return a boolean flag open you up to “silent failures.” You must always handle and propagate those failures—either with `require(...)` or a trusted wrapper like SafeERC20—to keep your state and your users’ funds safe.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.21;
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+pragma solidity ^0.4.18;
+
+contract LikeCoinInterface {
+	function balanceOf(address _owner) public constant returns (uint256 balance);
+	function transfer(address _to, uint256 _value) public returns (bool success);
+	function transferFrom(address _from, address _to, uint256 _value) public returns (bool success);
+	function approve(address _spender, uint256 _value) public returns (bool success);
+}
+
+ 
+
+contract Ownable {
+
+	address public owner;
+	address public pendingOwner;
+	address public operator;
+
+	event OwnershipTransferred(
+		address indexed previousOwner,
+		address indexed newOwner
+	);
+
+	 
+	constructor() public {
+		owner = msg.sender;
+	}
+
+	 
+	modifier onlyOwner() {
+		require(msg.sender == owner);
+		_;
+	}
+
+	 
+	modifier onlyPendingOwner() {
+		require(msg.sender == pendingOwner);
+		_;
+	}
+
+	modifier ownerOrOperator {
+		require(msg.sender == owner || msg.sender == operator);
+		_;
+	}
+
+	 
+	function transferOwnership(address newOwner) onlyOwner public {
+		pendingOwner = newOwner;
+	}
+
+	 
+	function claimOwnership() onlyPendingOwner public {
+		emit OwnershipTransferred(owner, pendingOwner);
+		owner = pendingOwner;
+		pendingOwner = address(0);
+	}
+
+	function setOperator(address _operator) onlyOwner public {
+		operator = _operator;
+	}
+
+}
+
+ 
+
+contract ArtMuseumBase is Ownable {
+
+	struct Artwork {
+		uint8 artworkType;
+		uint32 sequenceNumber;
+		uint128 value;
+		address player;
+	}
+	LikeCoinInterface public like;
+
+	 
+	uint32[] public ids;
+	 
+	uint32 public lastId;
+	 
+	uint32 public oldest;
+	 
+	mapping(uint32 => Artwork) artworks;
+	 
+	mapping(address=>mapping(uint8 => uint32)) userArtworkSequenceNumber;
+	 
+	uint128[] public costs;
+	 
+	uint128[] public values;
+	 
+	uint8 public fee;
+
+	 
+	uint32 public numArtworks;
+	 
+	uint16 public maxArtworks;
+	 
+	uint32[] numArtworksXType;
+
+	 
+	function init(address _likeAddr) public onlyOwner {
+		require(like==address(0));
+		like = LikeCoinInterface(_likeAddr);
+		costs = [800 ether, 2000 ether, 5000 ether, 12000 ether, 25000 ether];
+		setFee(5);
+		maxArtworks = 1000;
+		lastId = 1;
+		oldest = 0;
+	}
+
+	function deposit() payable public {
+
+	}
+
+	function withdrawBalance() public onlyOwner returns(bool res) {
+		owner.transfer(address(this).balance);
+		return true;
+	}
+
+	 
+	function collectFees(uint128 amount) public onlyOwner {
+		uint collectedFees = getFees();
+		if (amount <= collectedFees) {
+			like.transfer(owner,amount);
+		}
+	}
+
+	function getArtwork(uint32 artworkId) public constant returns(uint8 artworkType, uint32 sequenceNumber, uint128 value, address player) {
+		return (artworks[artworkId].artworkType, artworks[artworkId].sequenceNumber, artworks[artworkId].value, artworks[artworkId].player);
+	}
+
+	function getAllArtworks() public constant returns(uint32[] artworkIds,uint8[] types,uint32[] sequenceNumbers, uint128[] artworkValues) {
+		uint32 id;
+		artworkIds = new uint32[](numArtworks);
+		types = new uint8[](numArtworks);
+		sequenceNumbers = new uint32[](numArtworks);
+		artworkValues = new uint128[](numArtworks);
+		for (uint16 i = 0; i < numArtworks; i++) {
+			id = ids[i];
+			artworkIds[i] = id;
+			types[i] = artworks[id].artworkType;
+			sequenceNumbers[i] = artworks[id].sequenceNumber;
+			artworkValues[i] = artworks[id].value;
+		}
+	}
+
+	function getAllArtworksByOwner() public constant returns(uint32[] artworkIds,uint8[] types,uint32[] sequenceNumbers, uint128[] artworkValues) {
+		uint32 id;
+		uint16 j = 0;
+		uint16 howmany = 0;
+		address player = address(msg.sender);
+		for (uint16 k = 0; k < numArtworks; k++) {
+			if (artworks[ids[k]].player == player)
+				howmany++;
+		}
+		artworkIds = new uint32[](howmany);
+		types = new uint8[](howmany);
+		sequenceNumbers = new uint32[](howmany);
+		artworkValues = new uint128[](howmany);
+		for (uint16 i = 0; i < numArtworks; i++) {
+			if (artworks[ids[i]].player == player) {
+				id = ids[i];
+				artworkIds[j] = id;
+				types[j] = artworks[id].artworkType;
+				sequenceNumbers[j] = artworks[id].sequenceNumber;
+				ar
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, end-to-end recap of the issue, why it’s a DoS, and exactly how an attacker exploits it:
+
+1) The vulnerable pattern  
+   • The contract maintains one single dynamic array `ids` of all artwork IDs.  
+   • Every core function that adds, removes or even lists artworks does a full `for (i = 0; i < ids.length; i++)` scan of that array.  
+   • Each iteration touches storage (reads or writes), which costs on the order of 20 000–30 000 gas per loop.
+
+2) Why it becomes an unstoppable DoS  
+   • Ethereum has a hard block-gas limit (~8–12 million gas).  
+   • As `ids.length` grows, the cost of “scan the entire array” grows linearly.  
+   • The contract’s owner set `maxArtworks = 1000`. At ~25 000 gas per iteration, a single 1000-iteration scan costs ~25 million gas—well above the block limit.  
+   • Once you hit that point, *any* call that does that loop (add, remove, even on-chain viewers) will always run out of gas and revert. The contract is effectively frozen.
+
+3) Attack steps in practice  
+   1. Attacker repeatedly calls the “buyArtwork” (or equivalent “add”) function—this is publicly callable, costs only the normal token payment, and pushes `ids.length` steadily toward 1000.  
+   2. When `ids.length == 1000`, *every* function that contains `for (i = 0; i < ids.length; i++)` now consumes > block gas limit and reverts immediately.  
+   3. Neither honest users nor the owner can add, remove, transfer or even read artworks (via an on-chain view) because every path scans that huge array.
+
+4) Conditions for exploitation  
+   • An unbounded (or attacker-bounded) dynamic array that can reach a size making linear scans more expensive than any transaction can pay.  
+   • Core functionality (add/remove/list) implemented with O(n) loops over that array.  
+   • No per-address cap or privileged “prune” function that can cheaply shrink the array without scanning it.
+
+Key takeaway  
+Any time you see a user-controlled array growing without bound and core functions that do full O(n) scans, you have a ticking DoS time bomb. To prevent it, replace full-array loops with constant-time patterns (e.g. mappings + index pointers + swap-and-pop for removals), keep on-chain loops tightly bounded, or push bulk operations off-chain.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+// by nightman
+// winner gets the contract balance
+// 0.02 to play
+
+pragma solidity ^0.4.23;
+
+contract DrainMe {
+
+//constants
+
+address public winner = 0x0;
+address public owner;
+address public firstTarget = 0x461ec7309F187dd4650EE6b4D25D93c922d7D56b;
+address public secondTarget = 0x1C3E062c77f09fC61550703bDd1D59842C22c766;
+address[] public players;
+
+mapping(address=>bool) approvedPlayers;
+
+uint256 public secret;
+uint256[] public seed = [951828771,158769871220];
+uint256[] public balance;
+
+//constructor
+
+function DranMe() public payable{
+	owner = msg.sender;
+}
+
+//modifiers
+
+modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+}
+
+modifier onlyWinner() {
+    require(msg.sender == winner);
+    _;
+}
+
+modifier onlyPlayers() {
+    require(approvedPlayers[msg.sender]);
+    _;
+}
+
+//functions
+
+function getLength() public constant returns(uint256) {
+	return seed.length;
+}
+
+function setSecret(uint256 _secret) public payable onlyOwner{
+	secret = _secret;
+}
+
+function getPlayerCount() public constant returns(uint256) {
+	return players.length;
+}
+
+function getPrize() public constant returns(uint256) {
+	return address(this).balance;
+}
+
+function becomePlayer() public payable{
+	require(msg.value >= 0.02 ether);
+	players.push(msg.sender);
+	approvedPlayers[msg.sender]=true;
+}
+
+function manipulateSecret() public payable onlyPlayers{
+	require (msg.value >= 0.01 ether);
+	if(msg.sender!=owner || unlockSecret()){
+	    uint256 amount = 0;
+        msg.sender.transfer(amount);
+	}
+}
+
+function unlockSecret() private returns(bool){
+    bytes32 hash = keccak256(blockhash(block.number-1));
+    uint256 secret = uint256(hash);
+        if(secret%5==0){
+            winner = msg.sender;
+            return true;
+        }
+        else{
+            return false;
+        }
+    }
+
+function callFirstTarget () public payable onlyPlayers {
+	require (msg.value >= 0.005 ether);
+	
+	firstTarget.call.value(msg.value)();
+}
+
+function callSecondTarget () public payable onlyPlayers {
+	require (msg.value >= 0.005 ether);
+	
+	secondTarget.call.value(msg.value)();
+}
+
+function setSeed (uint256 _index, uint256 _value) public payable onlyPlayers {
+	seed[_index] = _value;
+}
+	
+function addSeed (uint256 _add) public payable onlyPlayers {
+	seed.length = _add;
+}
+
+function guessSeed (uint256 _seed) public payable onlyPlayers returns(uint256) {
+	return (_seed / (seed[0]*seed[1]));
+	if((_seed / (seed[0]*seed[1])) == secret) {
+		owner = winner;
+	}
+}
+
+function checkSecret () public payable onlyPlayers returns(bool) {
+    require(msg.value >= 0.01 ether);
+    if(msg.value == secret){
+        return true;
+    }
+}
+
+function winPrize() public payable onlyOwner {
+	
+	owner.call.value(1 wei)();
+}
+
+function claimPrize() public payable onlyWinner {
+	winner.transfer(address(this).balance);
+}
+
+//fallback function
+
+function() public payable{
+	}
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (reentrancy)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

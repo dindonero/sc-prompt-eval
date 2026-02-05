@@ -1,0 +1,141 @@
+# =============================================================================
+# Full Experiment for Publication
+# =============================================================================
+# Systematic evaluation of prompt engineering strategies for LLM-based
+# smart contract vulnerability detection.
+#
+# References:
+#   - SmartGuard (Ding et al., 2025): RAG + CoT + Self-check, 95% F1
+#   - LLM-SmartAudit (Wei et al., 2024): Multi-agent, BA/TA modes
+#   - iAudit (Ma et al., 2024): Fine-tuned pipeline, 91% F1
+#   - GPTScan (Sun et al., 2023): GPT + Static analysis, 90%+ precision
+#   - Du & Tang (2024): Chain-of-thought prompting for auditing
+#
+# Dataset: SmartBugs Curated (143 contracts, 10 vulnerability categories)
+# Design: 1 run per (contract, model, prompt) - 6 prompts × 2 models × 143 contracts
+# =============================================================================
+
+experiment_id: "prompt_engineering_evaluation_v1"
+output_dir: "outputs/experiment_v1"
+runs_per_item: 1  # Single run per (contract, model, prompt)
+random_seed: 42
+notes: |
+  Systematic evaluation comparing prompt engineering strategies for smart
+  contract vulnerability detection. Based on strategies from published papers:
+  - Chain-of-Thought (Du2024, SmartGuard)
+  - Plan-and-Solve (PromptEngineering2025Springer)
+  - Few-shot In-Context Learning (Chachar2025)
+
+# Tool configuration for P3, P4, P5, P6 prompts
+tools:
+  # P3 SmartGuard RAG settings (Zhang et al. 2024)
+  # RAG corpus: Qian et al. dataset (separate from SmartBugs test set)
+  top_k_patterns: 5  # Number of similar patterns to retrieve
+  enable_cot_expansion: true  # Full SmartGuard with CoT generation
+  use_icl_template: true  # True k-shot ICL format (SmartGuard Figure 4)
+  enable_iterative_selfcheck: true  # Multi-turn self-check with actual API calls
+  selfcheck_max_iterations: 3  # Max iterations before stopping
+  selfcheck_convergence_threshold: 0.9  # Jaccard similarity for early stopping
+
+  # P4 GPTScan/Slither settings (Sun et al. 2024)
+  slither_timeout: 120  # Seconds before Slither times out
+  p4_stage1_template: "p4_stage1_scenario.j2"
+  p4_stage2_template: "p4_stage2_property.j2"
+  p4_stage3_template: "p4_stage3_extraction.j2"
+
+  # P5 LLM-SmartAudit settings (Wei et al. 2024)
+  smartaudit_mode: BA  # BA (Broad Analysis) or TA (Targeted Analysis)
+  smartaudit_max_rounds: 3  # Paper default
+  smartaudit_consensus_threshold: 0.9  # Jaccard similarity for convergence
+  smartaudit_enable_role_exchange: true  # Role exchange per Figure 5b
+
+  # P6 iAudit settings (Ma et al. 2024)
+  p6_iaudit_detector_model: ""  # Path to merged detector model
+  p6_iaudit_reasoner_model: ""  # Path to merged reasoner model
+  p6_iaudit_ranker_model: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+  p6_iaudit_use_4bit: true
+  p6_iaudit_max_ranker_rounds: 5
+
+datasets:
+  - name: "smartbugs_curated"
+    kind: "smartbugs_curated"
+    path: "data/smartbugs_curated/dataset"
+
+  # Benign contracts for false positive measurement
+  - name: "benign_contracts"
+    kind: "benign_contracts"
+    path: "data/benign_contracts"
+
+models:
+  # Azure OpenAI o4-mini via NOVA IMS Playground
+  - name: "o4-mini"
+    provider: "openai"
+    params:
+      base_url: "https://novaimsplayground.cognitiveservices.azure.com/openai/v1/"
+      api_key_env: "AZURE_OPENAI_API_KEY"
+      temperature: 0.0  # Deterministic for reproducibility
+      max_tokens: 2000
+      top_p: 1.0
+
+prompts:
+  # =========================================================================
+  # P0: Baseline - Zero-shot minimal instruction (control condition)
+  # =========================================================================
+  - id: "P0_baseline"
+    template_path: "p0_baseline.j2"
+    description: "Single-pass baseline with JSON output format"
+
+  # =========================================================================
+  # P1: In-Context Learning (Single-Type) - Per-vulnerability prompts
+  # Reference: Chachar et al. (2025) - ICL for vulnerability detection
+  # Runs 10 separate prompts (one per DASP category) with type-specific examples
+  # =========================================================================
+  - id: "P1_icl"
+    template_path: "p1_icl_single_type.j2"
+    description: "Per-vulnerability-type ICL with 10 API calls"
+
+  # =========================================================================
+  # P2: Structured Reasoning / Chain-of-Thought with Audit Checklist
+  # Reference: Du & Tang (2024), SmartGuard (Ding et al., 2025)
+  # Plan-and-solve approach with systematic vulnerability checklist
+  # =========================================================================
+  - id: "P2_structured"
+    template_path: "p2_structured_reasoning.j2"
+    description: "Chain-of-thought with systematic audit checklist"
+
+  # =========================================================================
+  # P3: SmartGuard - RAG + Chain-of-Thought + Self-check
+  # Reference: Zhang et al. (2024) - SmartGuard, 95% F1
+  # Retrieves similar vulnerability patterns, then reasons with self-check
+  # =========================================================================
+  - id: "P3_smartguard"
+    template_path: "p3_smartguard.j2"
+    description: "RAG-enhanced with pattern retrieval and self-check"
+
+  # =========================================================================
+  # P4: Tool-Augmented - GPTScan-aligned multi-stage pipeline
+  # Reference: Sun et al. (2024) - GPTScan, 90%+ precision
+  # Three-stage LLM analysis: Scenario -> Property -> Extraction
+  # Plus pre-filtering and post-LLM static confirmation with Slither
+  # =========================================================================
+  - id: "P4_tool_augmented"
+    template_path: "p4_stage1_scenario.j2"  # Entry point; runner handles multi-stage
+    description: "GPTScan-aligned: pre-filter + 3-stage LLM + static confirmation"
+
+  # =========================================================================
+  # P5: LLM-SmartAudit - Multi-Agent with BA/TA modes
+  # Reference: Wei et al. (2024) - LLM-SmartAudit
+  # 4 agents, 3-phase task queue, role exchange mechanism
+  # =========================================================================
+  - id: "P5_smartaudit"
+    template_path: "p5_project_manager.j2"
+    description: "LLM-SmartAudit multi-agent with 4 specialized agents"
+
+  # =========================================================================
+  # P6: iAudit - Fine-tuned Detector + Reasoner + Ranker-Critic
+  # Reference: Ma et al. (2024) - iAudit, 91% F1
+  # Fine-tuned CodeLlama models with Mixtral ranker-critic
+  # =========================================================================
+  - id: "P6_iaudit"
+    template_path: "p6_iaudit.j2"
+    description: "Fine-tuned pipeline: Detector -> Reasoner -> Ranker-Critic"

@@ -1,0 +1,1098 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: FRONT_RUNNING VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/*
+ *
+ *
+ *
+ */
+
+pragma solidity ^0.4.24;
+
+/** Taken from the OpenZeppelin github
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+    // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (a == 0) {
+      return 0;
+    }
+
+    uint256 c = a * b;
+    require(c / a == b);
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b > 0); // Solidity only automatically asserts when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b <= a);
+    uint256 c = a - b;
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a + b;
+    require(c >= a);
+
+    return c;
+  }
+
+  /**
+  *
+  * reverts when dividing by zero.
+  */
+  function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0);
+    return a % b;
+  }
+}
+
+
+contract ERC20 {
+
+  event Transfer( address indexed from, address indexed to, uint256 value );
+  event Approval( address indexed owner, address indexed spender, uint256 value);
+  using SafeMath for *;
+
+  mapping (address => uint256) private _balances;
+
+  mapping (address => mapping (address => uint256)) private _allowed;
+
+  uint256 private _totalSupply;
+
+  constructor(uint totalSupply){
+    _balances[msg.sender] = totalSupply;
+  }
+
+  function balanceOf(address owner) public view returns (uint256) {
+    return _balances[owner];
+  }
+
+
+  function allowance(address owner, address spender) public view returns (uint256)
+  {
+    return _allowed[owner][spender];
+  }
+
+  function transfer(address to, uint256 value) public returns (bool) {
+    require(value <= _balances[msg.sender]);
+    require(to != address(0));
+
+    _balances[msg.sender] = _balances[msg.sender].sub(value);
+    _balances[to] = _balances[to].add(value);
+    emit Transfer(msg.sender, to, value);
+    return true;
+  }
+  // <yes> <report> FRONT_RUNNING
+  function approve(address spender, uint256 value) public returns (bool) {
+    require(spender != address(0));
+     // <yes> <report> FRONT_RUNNING
+    _allowed[msg.sender][spender] = value;
+    emit Approval(msg.sender, spender, value);
+    return true;
+  }
+
+  function transferFrom(address from, address to, uint256 value) public returns (bool) {
+    require(value <= _balances[from]);
+    require(value <= _allowed[from][msg.sender]);
+    require(to != address(0));
+
+    _balances[from] = _balances[from].sub(value);
+    _balances[to] = _balances[to].add(value);
+    _allowed[from][msg.sender] = _allowed[from][msg.sender].sub(value);
+    emit Transfer(from, to, value);
+    return true;
+  }
+}
+```
+
+**Security Analysis:**
+This code contains a front_running vulnerability.
+
+Here’s a concise, step-by-step breakdown of the issue, the attack scenario, and why it matters:
+
+1. Vulnerable code snippet  
+   • Function approve(spender, value) does:  
+     _allowed[msg.sender][spender] = value  
+   • It does not require the existing allowance to be zero before changing it.
+
+2. Why this is a problem (ERC-20 “race-condition” or “front-running” attack)  
+   • Suppose Alice has already approved Bob to spend N tokens.  
+   • Alice now wants to change Bob’s allowance from N to M.  
+   • Alice submits approve(Bob, M). That transaction sits in the mempool.  
+   • Bob notices the pending transaction and quickly calls transferFrom(Alice, Bob, N) to drain the old allowance.  
+   • Alice’s approve(Bob, M) then gets mined, setting Bob’s allowance to M.  
+   • Result: Bob has withdrawn N + M tokens, even though Alice intended to allow only M.
+
+3. Conditions for exploitation  
+   • The spender (Bob) must be able to see Alice’s approve transaction before it’s mined (i.e. in the mempool).  
+   • Bob must act quickly to front-run the change.  
+   • No special privileges or external calls are needed—just the ability to submit transactions faster than Alice’s transaction is mined.
+
+4. Why other common issues don’t apply here  
+   • No reentrancy risk (no external calls in transfer/approve).  
+   • All math is guarded by SafeMath—no overflows/underflows.  
+   • No unchecked low‐level calls, no loops over user lists, no timestamp or randomness issues.
+
+Final assessment  
+VULNERABLE
+
+
+**Classification**: This code contains a **front_running** vulnerability.
+
+---
+
+### EXAMPLE 2: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.23;
+
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (_a == 0) {
+      return 0;
+    }
+
+    uint256 c = _a * _b;
+    require(c / _a == _b);
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    require(_b > 0); // Solidity only automatically asserts when dividing by 0
+    uint256 c = _a / _b;
+    // assert(_a == _b * c + _a % _b); // There is no case in which this doesn't hold
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    require(_b <= _a);
+    uint256 c = _a - _b;
+
+    return c;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    uint256 c = _a + _b;
+    require(c >= _a);
+
+    return c;
+  }
+}
+
+/* Controls game play state and access rights for game functions
+ *
+ *
+ * Inspired and adapted from contract created by OpenZeppelin
+ * Ref: https://github.com/OpenZeppelin/zeppelin-solidity/
+ */
+contract OperationalControl {
+    // Facilitates access & control for the game.
+    // Roles:
+    //  -The Game Managers (Primary/Secondary): Has universal control of all game elements (No ability to withdraw)
+    //  -The Banker: The Bank can withdraw funds and adjust fees / prices.
+
+    ///
+    event ContractUpgrade(address newContract);
+
+    // The addresses of the accounts (or contracts) that can execute actions within each roles.
+    address public gameManagerPrimary;
+    address public gameManagerSecondary;
+    address public bankManager;
+
+    // @dev Keeps track whether the contract is paused. When that is true, most actions are blocked
+    bool public paused = false;
+
+    ///
+    modifier onlyGameManager() {
+        require(msg.sender == gameManagerPrimary || msg.sender == gameManagerSecondary);
+        _;
+    }
+
+    ///
+    modifier onlyBanker() {
+        require(msg.sender == bankManager);
+        _;
+    }
+
+    ///
+    modifier anyOperator() {
+        require(
+            msg.sender == gameManagerPrimary ||
+            msg.sender == gameManagerSecondary ||
+            msg.sender == bankManager
+        );
+        _;
+    }
+
+    ///
+    function setPrimaryGameManager(address _newGM) external onlyGameManager {
+        require(_newGM != address(0));
+
+        gameManagerPrimary = _newGM;
+    }
+
+    ///
+    function setSecondaryGameManager(address _newGM) external onlyGameManager {
+        require(_newGM != address(0));
+
+        gameManagerSecondary = _newGM;
+    }
+
+    ///
+    function setBanker(address _newBK) external onlyBanker {
+        require(_newBK != address(0));
+
+        bankManager = _newBK;
+    }
+
+    /*** Pausable functionality adapted from OpenZeppelin ***/
+
+    ///
+    modifier whenNotPaused() {
+        require(!paused);
+        _;
+    }
+
+    ///
+    modifier whenPaused {
+
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, accurate and complete summary of that DoS-by-pause issue:
+
+1) Vulnerable code pattern  
+   • pause() is callable by any “operator” (primary GM, secondary GM or the Banker).  
+   • unpause() is callable only by the two Game Managers.  
+
+   ```solidity
+   function pause()   external anyOperator   whenNotPaused { paused = true; }
+   function unpause() external onlyGameManager whenPaused    { paused = false; }
+   ```
+
+2) Attack vector  
+   • If the Banker’s key is compromised (or a rogue banker chooses), they can call pause() and flip the contract into the paused state.  
+   • Most user-facing functions (purchase, withdraw, play, etc.) guard themselves with `whenNotPaused`, so they immediately revert once paused.
+
+3) Why this becomes a permanent DoS  
+   • Only the Game Managers can ever call unpause().  
+   • If both Game Managers are unavailable (lost keys, uncooperative, gone), no one can unpause.  
+   • The contract stays locked forever—users cannot withdraw funds or interact with the game.
+
+4) Key lessons & possible fixes  
+   • Avoid asymmetric pause/unpause roles. Whoever can pause should also be able to unpause.  
+   • Introduce multi-party checks (e.g. 2-of-3 multisig) for pausing or unpausing.  
+   • Add a timelock or automatic unpause after a short delay to recover from a mistaken or malicious pause.
+
+This explanation identifies the flawed permission logic, walks through the banker-triggered pause attack, spells out the “both managers down” condition that locks the contract for good, and suggests concrete hardening strategies.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) public; }
+
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 _a, uint256 _b) internal pure returns (uint256 c) {
+    // Gas optimization: this is cheaper than asserting 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (_a == 0) {
+      return 0;
+    }
+
+    c = _a * _b;
+    assert(c / _a == _b);
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    // assert(_b > 0); // Solidity automatically throws when dividing by 0
+    // uint256 c = _a / _b;
+    // assert(_a == _b * c + _a % _b); // There is no case in which this doesn't hold
+    return _a / _b;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    assert(_b <= _a);
+    return _a - _b;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 _a, uint256 _b) internal pure returns (uint256 c) {
+    c = _a + _b;
+    assert(c >= _a);
+    return c;
+  }
+}
+
+contract TokenERC20 {
+    address public owner;
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 8;
+    using SafeMath for uint256;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    mapping (address => bool) public frozenAccount;
+    event FrozenFunds(address target, bool frozen);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    function TokenERC20(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        owner = msg.sender;
+        
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+    
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to].add(_value) > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from].add(balanceOf[_to]);
+        // Subtract from the sender
+        balanceOf[_from] = balanceOf[_from].sub(_value);
+        // Add the same to the recipient
+        balanceOf[_to] = balanceOf[_to].add(_value);
+        Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should nev
+```
+
+**Security Analysis:**
+Here is a consolidated, final review of the snippet you provided:
+
+1. Overall structure  
+   • Implements a straightforward ERC-20-style token (“TokenERC20”) with:  
+     – SafeMath for all arithmetic  
+     – An owner set in the constructor  
+     – `totalSupply = initialSupply * 10**decimals` (decimals = 8)  
+     – Standard `balanceOf` and `allowance` mappings  
+     – Transfer and Burn events, plus a `frozenAccount` mapping with a corresponding event  
+
+2. Transfer logic  
+   • The key operation is an internal `_transfer` that enforces:  
+     – `_to` is not the zero address  
+     – Sender has at least `_value` tokens  
+     – No overflow on the recipient’s balance (the extra `> balanceOf[_to]` check is redundant since SafeMath already reverts on overflow)  
+   • Balances are updated atomically, and a `Transfer` event is emitted.  
+
+3. Security considerations  
+   • Reentrancy: There are no external calls or Ether transfers—only state updates and events—so no reentrancy risk.  
+   • Integer safety: All arithmetic uses SafeMath. The extra overflow check is harmless (just redundant).  
+   • Access control: Only the owner can (presumably) freeze accounts, but the snippet never actually checks `frozenAccount` inside `_transfer`, so freezing is currently a dead feature—not exploitable, just non-functional.  
+   • Allowance/approve logic: Not shown in your snippet. If you add `approve`/`transferFrom`, follow the recommended “increase/decrease allowance” patterns to mitigate the known race-condition.  
+   • Denial-of-service or unbounded loops: None present.  
+   • Short-address attack: Modern Solidity’s ABI‐encoding already guards against this at runtime; no custom payload‐size checks are needed here.  
+
+4. Conclusion  
+   • No exploitable vulnerabilities are present in the provided code as written.  
+   • The only “issue” is that `frozenAccount` is never actually enforced in transfers—so it’s dead code, not a security hole.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) public; }
+
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 _a, uint256 _b) internal pure returns (uint256 c) {
+    // Gas optimization: this is cheaper than asserting 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (_a == 0) {
+      return 0;
+    }
+
+    c = _a * _b;
+    assert(c / _a == _b);
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    // assert(_b > 0); // Solidity automatically throws when dividing by 0
+    // uint256 c = _a / _b;
+    // assert(_a == _b * c + _a % _b); // There is no case in which this doesn't hold
+    return _a / _b;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 _a, uint256 _b) internal pure returns (uint256) {
+    assert(_b <= _a);
+    return _a - _b;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 _a, uint256 _b) internal pure returns (uint256 c) {
+    c = _a + _b;
+    assert(c >= _a);
+    return c;
+  }
+}
+
+contract TokenERC20 {
+    address public owner;
+    // Public variables of the token
+    string public name;
+    string public symbol;
+    uint8 public decimals = 8;
+    using SafeMath for uint256;
+    // 18 decimals is the strongly suggested default, avoid changing it
+    uint256 public totalSupply;
+
+    // This creates an array with all balances
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    // This generates a public event on the blockchain that will notify clients
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    // This notifies clients about the amount burnt
+    event Burn(address indexed from, uint256 value);
+
+    mapping (address => bool) public frozenAccount;
+    event FrozenFunds(address target, bool frozen);
+
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    function TokenERC20(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        owner = msg.sender;
+        
+        totalSupply = initialSupply * 10 ** uint256(decimals);  // Update total supply with the decimal amount
+        balanceOf[msg.sender] = totalSupply;                // Give the creator all initial tokens
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+    
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        // Prevent transfer to 0x0 address. Use burn() instead
+        require(_to != 0x0);
+        // Check if the sender has enough
+        require(balanceOf[_from] >= _value);
+        // Check for overflows
+        require(balanceOf[_to].add(_value) > balanceOf[_to]);
+        // Save this for an assertion in the future
+        uint previousBalances = balanceOf[_from].add(balanceOf[_to]);
+        // Subtract from the sender
+        balanceOf[_from] = balanceOf[_from].sub(_value);
+        // Add the same to the recipient
+        balanceOf[_to] = balanceOf[_to].add(_value);
+        Transfer(_from, _to, _value);
+        // Asserts are used to use static analysis to find bugs in your code. They should nev
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, step-by-step explanation of the unchecked low-level call vulnerability in an ERC-20-style `approveAndCall` function, how it can be exploited, and how to fix it:
+
+1) The Vulnerable Code Pattern  
+   • In many “ERC-20 + approveAndCall” implementations you’ll find:  
+     ```solidity
+     function approveAndCall(address _spender, uint256 _value, bytes _extraData) 
+       public returns (bool success) 
+     {
+       allowance[msg.sender][_spender] = _value;
+       // low-level CALL to notify the spender, but return value is ignored
+       _spender.call(
+         bytes4(keccak256("receiveApproval(address,uint256,address,bytes)")),
+         msg.sender,
+         _value,
+         this,
+         _extraData
+       );
+       return true;
+     }
+     ```  
+   • `.call(...)` returns only a `bool` indicating success or failure. If you don’t capture and check that `bool`, the calling contract has no way to know if the external call succeeded or reverted.
+
+2) How an Attacker Exploits It  
+   • A malicious `_spender` contract can make `receiveApproval(...)` fail (for example, by reverting explicitly or by using up more than the gas stipend in a fallback).  
+   • Because the token’s `approveAndCall` does not do  
+     ```solidity
+     require(_spender.call(...), "receiveApproval failed");
+     ```  
+     it silently ignores the failed call, still returns `true`, and leaves the allowance in place.  
+   • The attacker now has:  
+     - An on-chain allowance set by the token contract  
+     - No actual notification or accounting done by `receiveApproval`  
+     This mismatch can be used to lock up tokens, break expected workflows, or deceive users into thinking a “callback” succeeded when it never ran.
+
+3) Conditions That Enable This Exploit  
+   • Any external call via `address.call(...)`, `delegatecall`, or `callcode` only returns a `bool`; it does not automatically revert the caller.  
+   • If the caller ignores that returned `bool`, it cannot detect a failed external invocation.  
+   • A malicious or buggy callback (e.g. `receiveApproval`) can easily force `.call(...)` to return `false`—either by reverting internally or by exhausting gas—and the token contract will remain oblivious.
+
+4) How to Fix It  
+   Option A: Check the return value of the low-level call:  
+   ```solidity
+   require(
+     _spender.call(
+       bytes4(keccak256("receiveApproval(address,uint256,address,bytes)")),
+       msg.sender, _value, this, _extraData
+     ),
+     "receiveApproval failed"
+   );
+   ```  
+   Option B (preferred): Use a typed interface call instead of raw `.call` so that the compiler generates a proper function selector check and bubbling reverts:  
+   ```solidity
+   tokenRecipient(_spender).receiveApproval(msg.sender, _value, this, _extraData);
+   ```  
+   With a typed call, if `_spender` doesn’t implement `receiveApproval` or it reverts, your entire transaction reverts—preventing any half-updated state.
+
+Summary  
+  – Vulnerable code uses unchecked low-level `.call`.  
+  – A malicious callback can make `.call` return `false` and go unnoticed.  
+  – Always check the returned `bool` or—better—use a strongly-typed interface call to ensure failures revert cleanly.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.22;
+
+/**
+ *
+ *
+ * See https://github.com/ethereum/EIPs/issues/179
+ */
+contract ERC20Basic {
+  function totalSupply() public view returns (uint256);
+  function balanceOf(address who) public view returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    // Gas optimization: this is cheaper than asserting 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (a == 0) {
+      return 0;
+    }
+
+    c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    // uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return a / b;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+  uint256 totalSupply_;
+
+  /**
+  *
+  */
+  function totalSupply() public view returns (uint256) {
+    return totalSupply_;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) public returns (bool) {
+    require(_to != address(0));
+    require(_value <= balances[msg.sender]);
+
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    emit Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) public view returns (uint256) {
+    return balances[_owner];
+  }
+
+}
+
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender)
+    public view returns (uint256);
+
+  function transferFrom(address from, address to, uint256 value)
+    public returns (bool);
+
+  function approve(address spender, uint256 value) public returns (bool);
+  event Approval(
+    address indexed owner,
+    address indexed spender,
+    uint256 value
+  );
+}
+
+/**
+ *
+ *
+ *
+ * https://github.com/ethereum/EIPs/issues/20
+ * Based on code by FirstBlood: https://github.com/Firstbloodio/token/blob/master/smart_contract/FirstBloodToken.sol
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) internal allowed;
+
+
+  /**
+   *
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes – the code you’ve identified is exactly the classic ERC-20 “race” or “allowance front-run” issue, your attack description is spot-on, and you’ve listed all of the necessary conditions. Here is a concise, refined explanation:
+
+1) The vulnerable pattern  
+   In a typical OpenZeppelin “BasicToken/StandardToken” you see:  
+     function approve(address _spender, uint256 _value) public returns (bool) {  
+       allowed[msg.sender][_spender] = _value;  
+       emit Approval(msg.sender, _spender, _value);  
+       return true;  
+     }  
+   There is no requirement that the new `_value` is zero or that the old allowance is zero before you overwrite it.
+
+2) How the front-running exploit works  
+   – Alice has already allowed Bob to spend 100 tokens: `approve(Bob,100)`.  
+   – Alice submits a transaction to reduce Bob’s allowance to 50: `approve(Bob,50)`, which sits in the mempool.  
+   – Bob watches the mempool, sees Alice’s intent to reduce, and immediately sends:  
+         transferFrom(Alice, Bob, 100)  
+     paying higher gas so it mines first. Bob drains the original 100.  
+   – Alice’s old transaction then mines, setting the allowance to 50.  
+   – Bob now has a fresh allowance of 50, which he can immediately drain with another `transferFrom`, for a total of 150 tokens.
+
+3) Why this is a Denial-of-Service on allowance changes  
+   – Alice can never lower Bob’s allowance without first setting it to zero; Bob will always front-run the change and drain funds.  
+   – Any dApp logic that relies on safely changing or reducing allowances breaks, because users are effectively unable to alter an existing non-zero allowance.
+
+4) Conditions required for the attack  
+   • The token uses the naive `approve(spender, newValue)` (no zero-first check).  
+   • There is a non-zero allowance already in place.  
+   • The attacker can monitor the public mempool and submit a higher-priority transaction.  
+   • Ethereum’s gas-price‐based ordering lets the attacker front-run the allowance change.
+
+5) Simple mitigations  
+   – In `approve()`, require either `newValue == 0` or `oldValue == 0`:  
+       require(_value == 0 || allowed[msg.sender][_spender] == 0);  
+   – Offer dedicated helpers `increaseAllowance()` and `decreaseAllowance()` that adjust allowances incrementally.  
+   – Follow EIP-20’s recommendation that a spender first be set to zero before any non-zero reset.
+
+By enforcing a “zero‐first” rule (or using incremental allowance functions), you eliminate the race window altogether and prevent this entire class of DoS/front‐running attacks.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.24;
+
+/** Taken from the OpenZeppelin github
+ * @title SafeMath
+ * @dev Math operations with safety checks that revert on error
+ */
+library SafeMath {
+
+  /**
+  * @dev Multiplies two numbers, reverts on overflow.
+  */
+  function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+    // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (a == 0) {
+      return 0;
+    }
+
+    uint256 c = a * b;
+    require(c / a == b);
+
+    return c;
+  }
+
+  /**
+  * @dev Integer division of two numbers truncating the quotient, reverts on division by zero.
+  */
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b > 0); // Solidity only automatically asserts when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+
+    return c;
+  }
+
+  /**
+  * @dev Subtracts two numbers, reverts on overflow (i.e. if subtrahend is greater than minuend).
+  */
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b <= a);
+    uint256 c = a - b;
+
+    return c;
+  }
+
+  /**
+  * @dev Adds two numbers, reverts on overflow.
+  */
+  function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a + b;
+    require(c >= a);
+
+    return c;
+  }
+
+  /**
+  * @dev Divides two numbers and returns the remainder (unsigned integer modulo),
+  * reverts when dividing by zero.
+  */
+  function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0);
+    return a % b;
+  }
+}
+
+contract ERC20 {
+
+  event Transfer( address indexed from, address indexed to, uint256 value );
+  event Approval( address indexed owner, address indexed spender, uint256 value);
+  using SafeMath for *;
+
+  mapping (address => uint256) private _balances;
+
+  mapping (address => mapping (address => uint256)) private _allowed;
+
+  uint256 private _totalSupply;
+
+  constructor(uint totalSupply){
+    _balances[msg.sender] = totalSupply;
+  }
+
+  function balanceOf(address owner) public view returns (uint256) {
+    return _balances[owner];
+  }
+
+  function allowance(address owner, address spender) public view returns (uint256)
+  {
+    return _allowed[owner][spender];
+  }
+
+  function transfer(address to, uint256 value) public returns (bool) {
+    require(value <= _balances[msg.sender]);
+    require(to != address(0));
+
+    _balances[msg.sender] = _balances[msg.sender].sub(value);
+    _balances[to] = _balances[to].add(value);
+    emit Transfer(msg.sender, to, value);
+    return true;
+  }
+  
+  function approve(address spender, uint256 value) public returns (bool) {
+    require(spender != address(0));
+     
+    _allowed[msg.sender][spender] = value;
+    emit Approval(msg.sender, spender, value);
+    return true;
+  }
+
+  function transferFrom(address from, address to, uint256 value) public returns (bool) {
+    require(value <= _balances[from]);
+    require(value <= _allowed[from][msg.sender]);
+    require(to != address(0));
+
+    _balances[from] = _balances[from].sub(value);
+    _balances[to] = _balances[to].add(value);
+    _allowed[from][msg.sender] = _allowed[from][msg.sender].sub(value);
+    emit Transfer(from, to, value);
+    return true;
+  }
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (front_running)?
+- Does it have patterns similar to Example 2 (denial_of_service)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

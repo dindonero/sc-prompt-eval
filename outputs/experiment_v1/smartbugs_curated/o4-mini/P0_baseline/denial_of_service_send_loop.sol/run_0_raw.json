@@ -1,0 +1,25 @@
+{
+  "note": "Specialized runner - see extra_data for details",
+  "rendered_prompt": "You are a security auditor specializing in Solidity.\n\nTask:\n1) Audit the following Solidity contract for vulnerabilities.\n2) Classify each vulnerability using DASP categories (e.g., reentrancy, access_control, arithmetic).\n3) Return ONLY valid JSON that matches the schema below.\n4) If no issues are found, return [].\n\nSchema (informal):\n- Array of objects with keys:\n  category, title, severity, confidence, evidence{file, lines, function}, explanation, fix_suggestion\n\nContract:\n```solidity\n/*\n * @source: https://consensys.github.io/smart-contract-best-practices/known_attacks/#dos-with-unexpected-revert\n * @author: ConsenSys Diligence\n\n * Modified by Bernhard Mueller\n */\n\npragma solidity 0.4.24;\n\ncontract Refunder {\n    \naddress[] private refundAddresses;\nmapping (address => uint) public refunds;\n\n    constructor() {\n        refundAddresses.push(0x79B483371E87d664cd39491b5F06250165e4b184);\n        refundAddresses.push(0x79B483371E87d664cd39491b5F06250165e4b185);\n    }\n\n    // bad\n    function refundAll() public {\n        for(uint x; x < refundAddresses.length; x++) { // arbitrary length iteration based on how many addresses participated\n        \n            require(refundAddresses[x].send(refunds[refundAddresses[x]])); // doubly bad, now a single failure on send will hold up all funds\n        }\n    }\n\n}\n\n```",
+  "prompt_hash": "b362ed1954ebf988",
+  "model_info": {
+    "name": "o4-mini",
+    "provider": "openai",
+    "params": {
+      "base_url": "https://novaimsplayground.cognitiveservices.azure.com/openai/v1/",
+      "api_key_env": "AZURE_OPENAI_API_KEY",
+      "max_tokens": 65536
+    }
+  },
+  "extra": {
+    "parse_errors": [],
+    "raw_output": "[\n  {\n    \"category\": \"dos_unexpected_revert\",\n    \"title\": \"Denial of Service via unexpected revert in send\",\n    \"severity\": \"High\",\n    \"confidence\": \"High\",\n    \"evidence\": {\n      \"file\": \"Refunder.sol\",\n      \"lines\": [20, 22],\n      \"function\": \"refundAll\"\n    },\n    \"explanation\": \"Using require on send will revert the entire transaction if any single send fails, enabling a malicious or misconfigured recipient to block refunds for all participants.\",\n    \"fix_suggestion\": \"Implement the pull payment pattern: allow each address to claim its refund individually or handle failed sends without reverting the entire loop.\"\n  },\n  {\n    \"category\": \"dos_block_gas_limit\",\n    \"title\": \"Unbounded iteration over dynamic array\",\n    \"severity\": \"Medium\",\n    \"confidence\": \"High\",\n    \"evidence\": {\n      \"file\": \"Refunder.sol\",\n      \"lines\": [19, 21],\n      \"function\": \"refundAll\"\n    },\n    \"explanation\": \"Looping over refundAddresses with an unbounded length risks hitting the block gas limit, which would make the refundAll function uncallable as the array grows.\",\n    \"fix_suggestion\": \"Avoid unbounded loops in a single transaction. Use a pull-based refund mechanism or process refunds in manageable batches.\"\n  }\n]",
+    "rendered_prompt": "You are a security auditor specializing in Solidity.\n\nTask:\n1) Audit the following Solidity contract for vulnerabilities.\n2) Classify each vulnerability using DASP categories (e.g., reentrancy, access_control, arithmetic).\n3) Return ONLY valid JSON that matches the schema below.\n4) If no issues are found, return [].\n\nSchema (informal):\n- Array of objects with keys:\n  category, title, severity, confidence, evidence{file, lines, function}, explanation, fix_suggestion\n\nContract:\n```solidity\n/*\n * @source: https://consensys.github.io/smart-contract-best-practices/known_attacks/#dos-with-unexpected-revert\n * @author: ConsenSys Diligence\n\n * Modified by Bernhard Mueller\n */\n\npragma solidity 0.4.24;\n\ncontract Refunder {\n    \naddress[] private refundAddresses;\nmapping (address => uint) public refunds;\n\n    constructor() {\n        refundAddresses.push(0x79B483371E87d664cd39491b5F06250165e4b184);\n        refundAddresses.push(0x79B483371E87d664cd39491b5F06250165e4b185);\n    }\n\n    // bad\n    function refundAll() public {\n        for(uint x; x < refundAddresses.length; x++) { // arbitrary length iteration based on how many addresses participated\n        \n            require(refundAddresses[x].send(refunds[refundAddresses[x]])); // doubly bad, now a single failure on send will hold up all funds\n        }\n    }\n\n}\n\n```",
+    "api_calls": 1,
+    "latency_s": 21.711058378219604,
+    "prompt_tokens": 332,
+    "completion_tokens": 1589,
+    "total_tokens": 1921,
+    "cost_usd": 0.007356800000000001
+  }
+}

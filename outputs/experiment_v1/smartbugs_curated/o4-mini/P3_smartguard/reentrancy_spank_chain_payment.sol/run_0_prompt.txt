@@ -1,0 +1,1655 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+
+/* solium-disable security/no-block-members */
+/* solium-disable max-len */
+/* solium-disable security/no-send */
+
+pragma solidity ^0.4.26;
+
+import "@kleros/kleros-interaction/contracts/standard/arbitration/Arbitrable.sol";
+import "@kleros/kleros-interaction/contracts/libraries/CappedMath.sol";
+
+/**
+ *  Note that this contract trusts that the Arbitrator is honest and will not re-enter or modify its costs during a call.
+ *  Also note that tx.origin should not matter in contracts called by the governor.
+ */
+contract KlerosGovernor is Arbitrable {
+    using CappedMath for uint;
+
+    /* *** Contract variables *** */
+    enum Status { NoDispute, DisputeCreated, Resolved }
+
+    struct Session {
+        Round[] rounds; // Tracks each appeal round of the dispute in the session in the form rounds[appeal].
+        uint ruling; // The ruling that was given in this session, if any.
+        uint disputeID; // ID given to the dispute of the session, if any.
+        uint[] submittedLists; // Tracks all lists that were submitted in a session in the form submittedLists[submissionID].
+        uint sumDeposit; // Sum of all submission deposits in a session (minus arbitration fees). This is used to calculate the reward.
+        Status status; // Status of a session.
+        mapping(bytes32 => bool) alreadySubmitted; // Indicates whether or not the transaction list was already submitted in order to catch duplicates in the form alreadySubmitted[listHash].
+        uint durationOffset; // Time in seconds that prolongs the submission period after the first submission, to give other submitters time to react.
+    }
+
+    struct Transaction {
+        address target; // The address to call.
+        uint value; // Value paid by governor contract that will be used as msg.value in the execution.
+        bytes data; // Calldata of the transaction.
+        bool executed; // Whether the transaction was already executed or not.
+    }
+
+    struct Submission {
+        address submitter; // The one who submits the list.
+        uint deposit; // Value of the deposit paid upon submission of the list.
+        Transaction[] txs; // Transactions stored in the list in the form txs[_transactionIndex].
+        bytes32 listHash; // A hash chain of all transactions stored in the list. This is used as a unique identifier within a session.
+        uint submissionTime; // The time when the list was submitted.
+        bool approved; // Whether the list was approved for execution or not.
+        uint approvalTime; // The time when the list was approved.
+    }
+
+    struct Round {
+        mapping (uint => uint) paidFees; // Tracks the fees paid by each side in this round in the form paidFees[submissionID].
+        mapping (uint => bool) hasPaid; // True when the side has fully paid its fees, false otherwise in the form hasPaid[submissionID].
+        uint feeRewards; // Sum of reimbursable fees and stake rewards available to the parties that made contributions to the side that ultimately wins a dispute.
+        mapping(address => mapping (uint => uint)) contributions; // Maps contributors to their contributions for each side in the form contributions[address][submissionID].
+        uint successfullyPaid; // Sum of all successfully paid fees paid by all sides.
+    }
+
+    uint constant NO_SHADOW_WINNER = uint(-1); // The value that indicates that no one has successfully paid appeal fees in a current round. It's the largest integer and not 0, because 0 can be a valid submission index.
+
+    address public deployer; // The address of the deployer of the contract.
+
+    uint public reservedETH; // Sum of contract's submission deposits and appeal fees. These funds are not to be used in the 
+```
+
+**Security Analysis:**
+Here is a concise, focused write-up of the vulnerability, the attack vectors, and the conditions under which it can be exploited.  
+
+Summary of the setup  
+• During a “session,” anyone can submit an ordered list (array) of arbitrary calls (target address, ETH value, calldata).  
+• Submissions carry a deposit and timestamp; after a short window they are closed and—potentially after an on-chain dispute—the “winning” list is selected.  
+• The governor then executes the winning list by looping through the array and performing low-level `.call{value: …}(data)` on each entry in order.  
+• Finally, deposits and fees are settled according to the dispute outcome.  
+
+Vulnerability #1: Reentrancy in execute phase  
+• The core execution loop does something like:  
+    for (i = 0; i < txs.length; i++) {  
+      require(txs[i].target.call{value: txs[i].value}(txs[i].data));  
+    }  
+• There is no `nonReentrant` guard nor any other mutex around that loop.  
+• A malicious `target` contract in the list can reenter the governor (e.g. call back into `executeSession` or another state-mutating function) before the loop finishes or before state like “this session is done” is updated.  
+• Reentrancy can be used to:  
+  – Corrupt session state (e.g. mark a session as not executed, steal deposits)  
+  – Trigger unexpected code paths or double-execute parts of the loop  
+  – Drain funds from the governor or bypass fee-settlement  
+
+Attack conditions for reentrancy  
+– The attacker must get one of their transactions included in the “winning” list (e.g. by outbidding or waiting for the arbitrator’s ruling).  
+– That transaction’s target is a malicious contract that in its fallback or entry function calls back into the governor.  
+– Because there is no guard, reentrancy succeeds and the attacker can manipulate internal accounting or execute the loop multiple times.  
+
+Vulnerability #2: Denial-of-Service via bad or gas-burning calls  
+• The governor executes the entire list in a single on-chain transaction. If *any* call in the list reverts or simply runs out of gas, the entire execution aborts and reverts.  
+• A malicious submitter who wins can slip in:  
+  – A call that always reverts (e.g. `require(false)`)  
+  – A contract that self-destructs or loops until gas runs out  
+• Once the arbitrator picks that list, everyone’s session is stuck: no partial execution, no recovery path, deposits may be locked, future sessions may be blocked.  
+
+Attack conditions for DoS  
+– The attacker again needs to win the dispute and have their list selected.  
+– They include at least one “poison pill” transaction that always reverts or burns excessive gas.  
+– On execution, the entire call stack unwinds, the session never completes, and funds remain locked.  
+
+Other notes  
+– Unbounded arrays of submissions or rounds can also lead to uncallable loops (e.g. in `withdrawFees`), compounding denial-of-service risk.  
+– Reliance on `block.timestamp` for submission windows can be manipulated by miners—but this is a lower-severity concern compared to reentrancy and outright DoS.  
+
+Overall verdict  
+The governor’s pattern of looping over an untrusted list of low-level calls without any reentrancy lock or per-call protection is fundamentally unsafe. An attacker who wins a dispute can either reenter to subvert contract state or halt execution entirely.  
+
+Recommendations  
+• Add a `nonReentrant` modifier (or equivalent mutex) around the entire `executeSession` (or whatever function runs the winning list).  
+• Consider executing each call in its own try/catch so that a single revert cannot kill the entire batch—optionally skipping or refunding only the failed call.  
+• Cap the maximum length of the list or maximum gas per individual call to prevent unbounded gas consumption.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/**
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+
+/* solium-disable security/no-block-members */
+/* solium-disable max-len */
+/* solium-disable security/no-send */
+
+pragma solidity ^0.4.26;
+
+import "@kleros/kleros-interaction/contracts/standard/arbitration/Arbitrable.sol";
+import "@kleros/kleros-interaction/contracts/libraries/CappedMath.sol";
+
+/**
+ *  Note that this contract trusts that the Arbitrator is honest and will not re-enter or modify its costs during a call.
+ *  Also note that tx.origin should not matter in contracts called by the governor.
+ */
+contract KlerosGovernor is Arbitrable {
+    using CappedMath for uint;
+
+    /* *** Contract variables *** */
+    enum Status { NoDispute, DisputeCreated, Resolved }
+
+    struct Session {
+        Round[] rounds; // Tracks each appeal round of the dispute in the session in the form rounds[appeal].
+        uint ruling; // The ruling that was given in this session, if any.
+        uint disputeID; // ID given to the dispute of the session, if any.
+        uint[] submittedLists; // Tracks all lists that were submitted in a session in the form submittedLists[submissionID].
+        uint sumDeposit; // Sum of all submission deposits in a session (minus arbitration fees). This is used to calculate the reward.
+        Status status; // Status of a session.
+        mapping(bytes32 => bool) alreadySubmitted; // Indicates whether or not the transaction list was already submitted in order to catch duplicates in the form alreadySubmitted[listHash].
+        uint durationOffset; // Time in seconds that prolongs the submission period after the first submission, to give other submitters time to react.
+    }
+
+    struct Transaction {
+        address target; // The address to call.
+        uint value; // Value paid by governor contract that will be used as msg.value in the execution.
+        bytes data; // Calldata of the transaction.
+        bool executed; // Whether the transaction was already executed or not.
+    }
+
+    struct Submission {
+        address submitter; // The one who submits the list.
+        uint deposit; // Value of the deposit paid upon submission of the list.
+        Transaction[] txs; // Transactions stored in the list in the form txs[_transactionIndex].
+        bytes32 listHash; // A hash chain of all transactions stored in the list. This is used as a unique identifier within a session.
+        uint submissionTime; // The time when the list was submitted.
+        bool approved; // Whether the list was approved for execution or not.
+        uint approvalTime; // The time when the list was approved.
+    }
+
+    struct Round {
+        mapping (uint => uint) paidFees; // Tracks the fees paid by each side in this round in the form paidFees[submissionID].
+        mapping (uint => bool) hasPaid; // True when the side has fully paid its fees, false otherwise in the form hasPaid[submissionID].
+        uint feeRewards; // Sum of reimbursable fees and stake rewards available to the parties that made contributions to the side that ultimately wins a dispute.
+        mapping(address => mapping (uint => uint)) contributions; // Maps contributors to their contributions for each side in the form contributions[address][submissionID].
+        uint successfullyPaid; // Sum of all successfully paid fees paid by all sides.
+    }
+
+    uint constant NO_SHADOW_WINNER = uint(-1); // The value that indicates that no one has successfully paid appeal fees in a current round. It's the largest integer and not 0, because 0 can be a valid submission index.
+
+    address public deployer; // The address of the deployer of the contract.
+
+    uint public reservedETH; // Sum of contract's submission deposits and appeal fees. These funds are not to be used in the 
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Your write-up is spot-on: it precisely identifies the unchecked low-level call as the root issue, shows how a reverting target can silently break your governance, and spells out the exact conditions under which an attacker can exploit it. Below is a concise, refined explanation:
+
+1. Vulnerable Pattern  
+   • You have a Transaction struct holding  
+     – address target  
+     – uint    value  
+     – bytes  data  
+   • To execute, the logic does something like:  
+     ```solidity
+     target.call.value(value)(data);
+     submission.txs[i].executed = true;
+     ```  
+   • No `require` (or `if (!success) revert()`), so the boolean return from `.call` is ignored.
+
+2. Why This Is Dangerous  
+   • If `target` is a malicious contract that simply reverts, the low-level call returns `false` but the revert is *silently* swallowed.  
+   • Right after you mark that tx as executed – even though it never ran – corrupting your internal state.
+
+3. Exploit Scenario (Denial-of-Service)  
+   • Attacker submits a proposal containing:  
+     – `target` = address of their contract  
+     – `data`   = calldata that immediately reverts  
+   • Governor approves the proposal.  
+   • During execution, `.call` fails but you still flag it as done.  
+   • That step can no longer be retried or skipped, so the entire execution queue is stuck forever.
+
+4. Conditions Required for the Attack  
+   • Users can propose arbitrary `target` and `data`.  
+   • Execution uses unchecked low-level calls (`.call`, `.delegatecall`, etc.).  
+   • State is advanced unconditionally after the call, regardless of success.
+
+Key Takeaway  
+Always check the boolean result of any low-level call. Better yet, use well-audited utility functions (e.g. OpenZeppelin’s Address.functionCall) which revert on failure. Unchecked calls let malicious contracts force silent failures, corrupt internal state, and mount permanent denial-of-service.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.1;
+
+/*
+ *
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+
+/**
+ *
+ */
+library Address {
+    /**
+     *
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize, which returns 0 for contracts in
+        // construction, since the code is only stored at the end of the
+        // constructor execution.
+
+        uint256 size;
+        // solhint-disable-next-line no-inline-assembly
+        assembly { size := extcodesize(account) }
+        return size > 0;
+    }
+
+    /**
+     *
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        // solhint-disable-next-line avoid-low-level-calls, avoid-call-value
+        (bool success, ) = recipient.call{ value: amount }("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     *
+     * plain`call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+
+```
+
+**Security Analysis:**
+Yes—your write-up correctly pinpoints the bug, clearly walks through the reentry steps, and lists exactly why and when it can be triggered. Here’s a tightened summary:
+
+1. Vulnerable pattern  
+   • You do an external call that forwards all remaining gas (e.g. Address.sendValue or recipient.call{value: amount}(""))  
+   • You perform that call before updating your own state (you send ETH first, then decrement the user’s balance)
+
+2. Attack vector  
+   1) Attacker calls withdraw(amount).  
+   2) require(balances[attacker] ≥ amount) passes.  
+   3) Address.sendValue forwards all gas and triggers attacker’s fallback/receive.  
+   4) In fallback, attacker re-calls withdraw(amount) *before* your contract has reduced balances[attacker].  
+   5) Your contract again sees the full balance, sends ETH again, and only then finally updates balances[attacker].  
+   6) Loop repeats until your contract is drained.
+
+3. Conditions for exploitation  
+   • You forward *all* gas, giving the callee enough budget to reenter.  
+   • You update state *after* the external call (interaction → effect).  
+   • No mutex or reentrancy guard is in place.
+
+4. Defenses  
+   • Follow Checks-Effects-Interactions:  
+     1) Check balances and permissions  
+     2) **Effect:** deduct the balance  
+     3) **Interaction:** then send ETH  
+   • Or deploy a ReentrancyGuard to block nested calls.  
+   • (Less preferred) Limit forwarded gas (e.g. transfer or a low-gas call).
+
+By sending ETH with an unrestricted call before you lower the sender’s balance, you give an attacker the exact window they need to reenter and drain funds far beyond their entitlement. That sequence—forward all gas + interaction before effect—*is* the classic reentrancy hole.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.1;
+
+/*
+ *
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+
+/**
+ *
+ */
+library Address {
+    /**
+     *
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize, which returns 0 for contracts in
+        // construction, since the code is only stored at the end of the
+        // constructor execution.
+
+        uint256 size;
+        // solhint-disable-next-line no-inline-assembly
+        assembly { size := extcodesize(account) }
+        return size > 0;
+    }
+
+    /**
+     *
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        // solhint-disable-next-line avoid-low-level-calls, avoid-call-value
+        (bool success, ) = recipient.call{ value: amount }("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     *
+     * plain`call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, step-by-step breakdown of “unchecked low-level calls” and why the small Address.sol excerpt you saw is risky once you look at the whole library:
+
+1) What makes a call “low-level”?  
+   • Any use of .call(), .delegatecall() or .staticcall() instead of a normal Solidity function call  
+   • These EVM primitives return two things:  
+     – A boolean success flag  
+     – A bytes blob of returned data  
+
+2) Why ignoring the success flag is dangerous  
+   • If you write  
+       someAddress.call{value:…}(payload);  
+     and never do  
+       require(success, “call failed”);  
+     you carry on as if the external code ran correctly when in fact it may have reverted or run out of gas.  
+   • This breaks your contract’s internal logic and accounting, because you have no guarantee the intended effect (token transfer, state change, etc.) actually occurred.  
+
+3) Real-world attack pattern  
+   • Your contract does:  
+       token.call(abi.encodeWithSelector(token.transfer.selector, msg.sender, amount));  
+       balances[msg.sender] += amount;  
+   • Attacker deploys a fake ERC-20 where transfer(...) always reverts → .call() returns (false, …)  
+   • You ignore success and credit balances[msg.sender] anyway  
+   • Attacker now withdraws “nonexistent” tokens, draining your real reserves  
+
+4) Conditions for exploitation  
+   • You use .call() / .delegatecall() / .staticcall() on an address you don’t fully control (ERC-20, fallback(), module…)  
+   • You do not immediately check the returned bool (via require or equivalent) or bubble up the revert reason  
+   • You trust downstream effects (accounting, state changes, event emissions) even if the call failed  
+
+5) How to fix it  
+   • Always check the boolean:  
+       (bool success, bytes memory data) = target.call(payload);  
+       require(success, “Low-level call failed”);  
+   • Or use audited wrappers (like OpenZeppelin’s functionCall) which revert on failure and forward revert reasons  
+
+Bottom line: any low-level call without an immediate `require(success)` (or equivalent) opens the door to attackers forcing failures and tricking your contract into doing the wrong thing. Always bubble up or handle the success flag.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.17;
+
+/*
+
+ICO Syndicate Contract
+========================
+
+Buys ICO Tokens for a given ICO known contract address
+Author: Bogdan
+
+*/
+
+// ERC20 Interface: https://github.com/ethereum/EIPs/issues/20
+contract ERC20 {
+    function transfer(address _to, uint256 _value) public returns (bool success);
+    function balanceOf(address _owner) public constant returns (uint256 balance);
+}
+
+contract ICOSyndicate {
+    // Store the amount of ETH deposited by each account.
+    mapping (address => uint256) public balances;
+    // Track whether the contract has bought the tokens yet.
+    bool public bought_tokens;
+    // Record ETH value of tokens currently held by contract.
+    uint256 public contract_eth_value;
+    // Emergency kill switch in case a critical bug is found.
+    bool public kill_switch;
+
+    // Maximum amount of user ETH contract will accept.  Reduces risk of hard cap related failure.
+    uint256 public eth_cap = 30000 ether;
+    // The developer address.
+    address public developer = 0x91d97da49d3cD71B475F46d719241BD8bb6Af18f;
+    // The crowdsale address.  Settable by the developer.
+    address public sale;
+    // The token address.  Settable by the developer.
+    ERC20 public token;
+
+    // Allows the developer to set the crowdsale and token addresses.
+    function set_addresses(address _sale, address _token) public {
+        // Only allow the developer to set the sale and token addresses.
+        require(msg.sender == developer);
+        // Only allow setting the addresses once.
+        require(sale == 0x0);
+        // Set the crowdsale and token addresses.
+        sale = _sale;
+        token = ERC20(_token);
+    }
+
+    // Allows the developer or anyone with the password to shut down everything except withdrawals in emergencies.
+    function activate_kill_switch() public {
+        // Only activate the kill switch if the sender is the developer or the password is correct.
+        require(msg.sender == developer);
+        // Irreversibly activate the kill switch.
+        kill_switch = true;
+    }
+
+    // Withdraws all ETH deposited or tokens purchased by the given user and rewards the caller.
+    function withdraw(address user) public {
+        // Only allow withdrawals after the contract has had a chance to buy in.
+        require(bought_tokens);
+        // Short circuit to save gas if the user doesn't have a balance.
+        if (balances[user] == 0) return;
+        // If the contract failed to buy into the sale, withdraw the user's ETH.
+        if (!bought_tokens) {
+            // Store the user's balance prior to withdrawal in a temporary variable.
+            uint256 eth_to_withdraw = balances[user];
+            // Update the user's balance prior to sending ETH to prevent recursive call.
+            balances[user] = 0;
+            // Return the user's funds.  Throws on failure to prevent loss of funds.
+            user.transfer(eth_to_withdraw);
+        }
+        // Withdraw the user's tokens if the contract has purchased them.
+        else {
+            // Retrieve current token balance of contract.
+            uint256 contract_token_balance = token.balanceOf(address(this));
+            // Disallow token withdrawals if there are no tokens to withdraw.
+            require(contract_token_balance != 0);
+            // Store the user's token balance in a temporary variable.
+            uint256 tokens_to_withdraw = (balances[user] * contract_token_balance) / contract_eth_value;
+            // Update the value of tokens currently held by the contract.
+            contract_eth_value -= balances[user];
+            // Update the user's balance prior to sending to prevent recursive call.
+            balances[user] = 0;
+            // Send the funds.  Throws on failure to prevent loss of funds.
+            require(token.transfer(user, tokens_to_withdraw));
+
+        }
+
+    }
+
+    // Buys tokens in the crowdsale and rewards the caller, callable by anyone.
+    function buy() public {
+        // Short circuit to sa
+```
+
+**Security Analysis:**
+Here’s a concise, final explanation of the hole and its exploit, followed by the easy fixes:
+
+1. What the contract does (simplified)  
+   • function withdraw(address user) public {  
+       – Read total tokens in the syndicate (`token.balanceOf(this)`)  
+       – Compute `tokens_to_pay = balances[user] * total_tokens / contract_eth_value`  
+       – Subtract `balances[user]` from `contract_eth_value` and zero out `balances[user]`  
+       – Call `token.transfer(user, tokens_to_pay)`  
+     }
+
+2. Why it looks “safe” at first glance  
+   • It uses Checks–Effects–Interactions for the *current* user:  
+     – Checks: computes the payout  
+     – Effects: zeroes out that user’s balance  
+     – Interaction: calls out to the ERC-20 token
+
+3. The critical oversight  
+   • You pass in an arbitrary `user` address rather than forcing `msg.sender`  
+   • You call an **untrusted** token contract in the middle of your logic  
+   • If that token’s `transfer` re-enters your syndicate, it can call `withdraw(otherVictim)`
+
+4. How the attack works step by step  
+   1. Attacker deploys a malicious ERC-20 whose `transfer(...)` does:  
+        – normal transfer bookkeeping  
+        – then `ICOSyndicate(msg.sender).withdraw(victim)`  
+   2. Honest state is: `balances[A]=10, balances[B]=10, contract_eth_value=20`  
+   3. Attacker calls `withdraw(A)`. Syndicate zeroes out `balances[A]`, drops `contract_eth_value` to 10, then calls `token.transfer(A, attackerTokens)`.  
+   4. Inside the malicious token’s `transfer`, execution re-enters `ICOSyndicate.withdraw(B)`. Now:  
+        – `balances[B]` is still 10  
+        – `contract_eth_value` is 10  
+        – Therefore `tokens_to_pay` for B = 10 * (10 tokens left) / 10 = **all remaining tokens**  
+   5. Attacker drains B’s share in that one transaction.
+
+5. Conditions that make it possible  
+   • `withdraw(address user)` is public and lets you specify *any* user  
+   • The external call is to an untrusted token contract that can re-enter  
+   • There is no reentrancy guard
+
+6. How to fix it (pick one or more)  
+   • Restrict withdrawals so you can only pull your own balance:  
+     `function withdraw() public { withdrawInternal(msg.sender); }`  
+   • Add a non-reentrant modifier around the whole withdraw logic  
+   • Eliminate any external calls before all user state is *completely* settled
+
+In summary, although you zero out the *immediate* user’s balance before calling `transfer`, you leave *other* users’ balances intact—and because you let a malicious token re-enter with a different `user` param, they can drain everyone else in the same transaction. That is a textbook re-entrancy vulnerability.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: https://github.com/trailofbits/not-so-smart-contracts/blob/master/reentrancy/SpankChain_source_code/SpankChain_Payment.sol
+ * @author: -
+ 
+ */
+
+ // https://etherscan.io/address/0xf91546835f756da0c10cfa0cda95b15577b84aa7#code
+
+ pragma solidity ^0.4.23;
+ // produced by the Solididy File Flattener (c) David Appleton 2018
+ // contact : dave@akomba.com
+ // released under Apache 2.0 licence
+ contract Token {
+     /* This is a slight change to the ERC20 base standard.
+     function totalSupply() constant returns (uint256 supply);
+     is replaced with:
+     uint256 public totalSupply;
+     This automatically creates a getter function for the totalSupply.
+     This is moved to the base contract since public getter functions are not
+     currently recognised as an implementation of the matching abstract
+     function by the compiler.
+     */
+     /// total amount of tokens
+     uint256 public totalSupply;
+
+     /// @param _owner The address from which the balance will be retrieved
+     /// @return The balance
+     function balanceOf(address _owner) public constant returns (uint256 balance);
+
+     /// @notice send `_value` token to `_to` from `msg.sender`
+     /// @param _to The address of the recipient
+     /// @param _value The amount of token to be transferred
+     /// @return Whether the transfer was successful or not
+     function transfer(address _to, uint256 _value) public returns (bool success);
+
+     /// @notice send `_value` token to `_to` from `_from` on the condition it is approved by `_from`
+     /// @param _from The address of the sender
+     /// @param _to The address of the recipient
+     /// @param _value The amount of token to be transferred
+     /// @return Whether the transfer was successful or not
+     function transferFrom(address _from, address _to, uint256 _value) public returns (bool success);
+
+     /// @notice `msg.sender` approves `_spender` to spend `_value` tokens
+     /// @param _spender The address of the account able to transfer the tokens
+     /// @param _value The amount of tokens to be approved for transfer
+     /// @return Whether the approval was successful or not
+     function approve(address _spender, uint256 _value) public returns (bool success);
+
+     /// @param _owner The address of the account owning tokens
+     /// @param _spender The address of the account able to transfer the tokens
+     /// @return Amount of remaining tokens allowed to spent
+     function allowance(address _owner, address _spender) public constant returns (uint256 remaining);
+
+     event Transfer(address indexed _from, address indexed _to, uint256 _value);
+     event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+ }
+
+ library ECTools {
+
+     // @dev Recovers the address which has signed a message
+     // @thanks https://gist.github.com/axic/5b33912c6f61ae6fd96d6c4a47afde6d
+     function recoverSigner(bytes32 _hashedMsg, string _sig) public pure returns (address) {
+         require(_hashedMsg != 0x00);
+
+         // need this for test RPC
+         bytes memory prefix = "\x19Ethereum Signed Message:\n32";
+         bytes32 prefixedHash = keccak256(abi.encodePacked(prefix, _hashedMsg));
+
+         if (bytes(_sig).length != 132) {
+             return 0x0;
+         }
+         bytes32 r;
+         bytes32 s;
+         uint8 v;
+         bytes memory sig = hexstrToBytes(substring(_sig, 2, 132));
+         assembly {
+             r := mload(add(sig, 32))
+             s := mload(add(sig, 64))
+             v := byte(0, mload(add(sig, 96)))
+         }
+         if (v < 27) {
+             v += 27;
+         }
+         if (v < 27 || v > 28) {
+             return 0x0;
+         }
+         return ecrecover(prefixedHash, v, r, s);
+     }
+
+     // @dev Verifies if the message is signed by an address
+     function isSignedBy(bytes32 _hashedMsg, string _sig, address _addr) public pure returns (bool) {
+         require(_addr != 0x0);
+
+         return _addr == recoverSigner(_hashedMsg, _sig);
+     }
+
+     // @dev Converts an hexstring to bytes
+     function hexstrToBytes(string _hexstr) public pure returns (bytes) {
+         uint len = bytes(_hexstr).length;
+         require(len % 2 == 0);
+
+         bytes memory bstr = bytes(new string(len / 2));
+         uint k = 0;
+         string memory s;
+         string memory r;
+         for (uint i = 0; i < len; i += 2) {
+             s = substring(_hexstr, i, i + 1);
+             r = substring(_hexstr, i + 1, i + 2);
+             uint p = parseInt16Char(s) * 16 + parseInt16Char(r);
+             bstr[k++] = uintToBytes32(p)[31];
+         }
+         return bstr;
+     }
+
+     // @dev Parses a hexchar, like 'a', and returns its hex value, in this case 10
+     function parseInt16Char(string _char) public pure returns (uint) {
+         bytes memory bresult = bytes(_char);
+         // bool decimals = false;
+         if ((bresult[0] >= 48) && (bresult[0] <= 57)) {
+             return uint(bresult[0]) - 48;
+         } else if ((bresult[0] >= 65) && (bresult[0] <= 70)) {
+             return uint(bresult[0]) - 55;
+         } else if ((bresult[0] >= 97) && (bresult[0] <= 102)) {
+             return uint(bresult[0]) - 87;
+         } else {
+             revert();
+         }
+     }
+
+     // @dev Converts a uint to a bytes32
+     // @thanks https://ethereum.stackexchange.com/questions/4170/how-to-convert-a-uint-to-bytes-in-solidity
+     function uintToBytes32(uint _uint) public pure returns (bytes b) {
+         b = new bytes(32);
+         assembly {mstore(add(b, 32), _uint)}
+     }
+
+     // @dev Hashes the signed message
+     // @ref https://github.com/ethereum/go-ethereum/issues/3731#issuecomment-293866868
+     function toEthereumSignedMessage(string _msg) public pure returns (bytes32) {
+         uint len = bytes(_msg).length;
+         require(len > 0);
+         bytes memory prefix = "\x19Ethereum Signed Message:\n";
+         return keccak256(abi.encodePacked(prefix, uintToString(len), _msg));
+     }
+
+     // @dev Converts a uint in a string
+     function uintToString(uint _uint) public pure returns (string str) {
+         uint len = 0;
+         uint m = _uint + 0;
+         while (m != 0) {
+             len++;
+             m /= 10;
+         }
+         bytes memory b = new bytes(len);
+         uint i = len - 1;
+         while (_uint != 0) {
+             uint remainder = _uint % 10;
+             _uint = _uint / 10;
+             b[i--] = byte(48 + remainder);
+         }
+         str = string(b);
+     }
+
+     // @dev extract a substring
+     // @thanks https://ethereum.stackexchange.com/questions/31457/substring-in-solidity
+     function substring(string _str, uint _startIndex, uint _endIndex) public pure returns (string) {
+         bytes memory strBytes = bytes(_str);
+         require(_startIndex <= _endIndex);
+         require(_startIndex >= 0);
+         require(_endIndex <= strBytes.length);
+
+         bytes memory result = new bytes(_endIndex - _startIndex);
+         for (uint i = _startIndex; i < _endIndex; i++) {
+             result[i - _startIndex] = strBytes[i];
+         }
+         return string(result);
+     }
+ }
+ contract StandardToken is Token {
+
+     function transfer(address _to, uint256 _value) public returns (bool success) {
+         //Default assumes totalSupply can't be over max (2^256 - 1).
+         //If your token leaves out totalSupply and can issue more tokens as time goes on, you need to check if it doesn't wrap.
+         //Replace the if with this one instead.
+         //require(balances[msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+         require(balances[msg.sender] >= _value);
+         balances[msg.sender] -= _value;
+         balances[_to] += _value;
+         emit Transfer(msg.sender, _to, _value);
+         return true;
+     }
+
+     function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+         //same as above. Replace this line with the following if you want to protect against wrapping uints.
+         //require(balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+         require(balances[_from] >= _value && allowed[_from][msg.sender] >= _value);
+         balances[_to] += _value;
+         balances[_from] -= _value;
+         allowed[_from][msg.sender] -= _value;
+         emit Transfer(_from, _to, _value);
+         return true;
+     }
+
+     function balanceOf(address _owner) public constant returns (uint256 balance) {
+         return balances[_owner];
+     }
+
+     function approve(address _spender, uint256 _value) public returns (bool success) {
+         allowed[msg.sender][_spender] = _value;
+         emit Approval(msg.sender, _spender, _value);
+         return true;
+     }
+
+     function allowance(address _owner, address _spender) public constant returns (uint256 remaining) {
+       return allowed[_owner][_spender];
+     }
+
+     mapping (address => uint256) balances;
+     mapping (address => mapping (address => uint256)) allowed;
+ }
+
+ contract HumanStandardToken is StandardToken {
+
+     /* Public variables of the token */
+
+     /*
+     NOTE:
+     The following variables are OPTIONAL vanities. One does not have to include them.
+     They allow one to customise the token contract & in no way influences the core functionality.
+     Some wallets/interfaces might not even bother to look at this information.
+     */
+     string public name;                   //fancy name: eg Simon Bucks
+     uint8 public decimals;                //How many decimals to show. ie. There could 1000 base units with 3 decimals. Meaning 0.980 SBX = 980 base units. It's like comparing 1 wei to 1 ether.
+     string public symbol;                 //An identifier: eg SBX
+     string public version = 'H0.1';       //human 0.1 standard. Just an arbitrary versioning scheme.
+
+     constructor(
+         uint256 _initialAmount,
+         string _tokenName,
+         uint8 _decimalUnits,
+         string _tokenSymbol
+         ) public {
+         balances[msg.sender] = _initialAmount;               // Give the creator all initial tokens
+         totalSupply = _initialAmount;                        // Update total supply
+         name = _tokenName;                                   // Set the name for display purposes
+         decimals = _decimalUnits;                            // Amount of decimals for display purposes
+         symbol = _tokenSymbol;                               // Set the symbol for display purposes
+     }
+
+     /* Approves and then calls the receiving contract */
+     function approveAndCall(address _spender, uint256 _value, bytes _extraData) public returns (bool success) {
+         allowed[msg.sender][_spender] = _value;
+         emit Approval(msg.sender, _spender, _value);
+
+         //call the receiveApproval function on the contract you want to be notified. This crafts the function signature manually so one doesn't have to include a contract in here just for this.
+         //receiveApproval(address _from, uint256 _value, address _tokenContract, bytes _extraData)
+         //it is assumed that when does this that the call *should* succeed, otherwise one would use vanilla approve instead.
+         require(_spender.call(bytes4(bytes32(keccak256("receiveApproval(address,uint256,address,bytes)"))), msg.sender, _value, this, _extraData));
+         return true;
+     }
+ }
+
+ contract LedgerChannel {
+
+     string public constant NAME = "Ledger Channel";
+     string public constant VERSION = "0.0.1";
+
+     uint256 public numChannels = 0;
+
+     event DidLCOpen (
+         bytes32 indexed channelId,
+         address indexed partyA,
+         address indexed partyI,
+         uint256 ethBalanceA,
+         address token,
+         uint256 tokenBalanceA,
+         uint256 LCopenTimeout
+     );
+
+     event DidLCJoin (
+         bytes32 indexed channelId,
+         uint256 ethBalanceI,
+         uint256 tokenBalanceI
+     );
+
+     event DidLCDeposit (
+         bytes32 indexed channelId,
+         address indexed recipient,
+         uint256 deposit,
+         bool isToken
+     );
+
+     event DidLCUpdateState (
+         bytes32 indexed channelId,
+         uint256 sequence,
+         uint256 numOpenVc,
+         uint256 ethBalanceA,
+         uint256 tokenBalanceA,
+         uint256 ethBalanceI,
+         uint256 tokenBalanceI,
+         bytes32 vcRoot,
+         uint256 updateLCtimeout
+     );
+
+     event DidLCClose (
+         bytes32 indexed channelId,
+         uint256 sequence,
+         uint256 ethBalanceA,
+         uint256 tokenBalanceA,
+         uint256 ethBalanceI,
+         uint256 tokenBalanceI
+     );
+
+     event DidVCInit (
+         bytes32 indexed lcId,
+         bytes32 indexed vcId,
+         bytes proof,
+         uint256 sequence,
+         address partyA,
+         address partyB,
+         uint256 balanceA,
+         uint256 balanceB
+     );
+
+     event DidVCSettle (
+         bytes32 indexed lcId,
+         bytes32 indexed vcId,
+         uint256 updateSeq,
+         uint256 updateBalA,
+         uint256 updateBalB,
+         address challenger,
+         uint256 updateVCtimeout
+     );
+
+     event DidVCClose(
+         bytes32 indexed lcId,
+         bytes32 indexed vcId,
+         uint256 balanceA,
+         uint256 balanceB
+     );
+
+     struct Channel {
+         //TODO: figure out if it's better just to split arrays by balances/deposits instead of eth/erc20
+         address[2] partyAddresses; // 0: partyA 1: partyI
+         uint256[4] ethBalances; // 0: balanceA 1:balanceI 2:depositedA 3:depositedI
+         uint256[4] erc20Balances; // 0: balanceA 1:balanceI 2:depositedA 3:depositedI
+         uint256[2] initialDeposit; // 0: eth 1: tokens
+         uint256 sequence;
+         uint256 confirmTime;
+         bytes32 VCrootHash;
+         uint256 LCopenTimeout;
+         uint256 updateLCtimeout; // when update LC times out
+         bool isOpen; // true when both parties have joined
+         bool isUpdateLCSettling;
+         uint256 numOpenVC;
+         HumanStandardToken token;
+     }
+
+     // virtual-channel state
+     struct VirtualChannel {
+         bool isClose;
+         bool isInSettlementState;
+         uint256 sequence;
+         address challenger; // Initiator of challenge
+         uint256 updateVCtimeout; // when update VC times out
+         // channel state
+         address partyA; // VC participant A
+         address partyB; // VC participant B
+         address partyI; // LC hub
+         uint256[2] ethBalances;
+         uint256[2] erc20Balances;
+         uint256[2] bond;
+         HumanStandardToken token;
+     }
+
+     mapping(bytes32 => VirtualChannel) public virtualChannels;
+     mapping(bytes32 => Channel) public Channels;
+
+     function createChannel(
+         bytes32 _lcID,
+         address _partyI,
+         uint256 _confirmTime,
+         address _token,
+         uint256[2] _balances // [eth, token]
+     )
+         public
+         payable
+     {
+         require(Channels[_lcID].partyAddresses[0] == address(0), "Channel has already been created.");
+         require(_partyI != 0x0, "No partyI address provided to LC creation");
+         require(_balances[0] >= 0 && _balances[1] >= 0, "Balances cannot be negative");
+         // Set initial ledger channel state
+         // Alice must execute this and we assume the initial state
+         // to be signed from this requirement
+         // Alternative is to check a sig as in joinChannel
+         Channels[_lcID].partyAddresses[0] = msg.sender;
+         Channels[_lcID].partyAddresses[1] = _partyI;
+
+         if(_balances[0] != 0) {
+             require(msg.value == _balances[0], "Eth balance does not match sent value");
+             Channels[_lcID].ethBalances[0] = msg.value;
+         }
+         if(_balances[1] != 0) {
+             Channels[_lcID].token = HumanStandardToken(_token);
+             require(Channels[_lcID].token.transferFrom(msg.sender, this, _balances[1]),"CreateChannel: token transfer failure");
+             Channels[_lcID].erc20Balances[0] = _balances[1];
+         }
+
+         Channels[_lcID].sequence = 0;
+         Channels[_lcID].confirmTime = _confirmTime;
+         // is close flag, lc state sequence, number open vc, vc root hash, partyA...
+         //Channels[_lcID].stateHash = keccak256(uint256(0), uint256(0), uint256(0), bytes32(0x0), bytes32(msg.sender), bytes32(_partyI), balanceA, balanceI);
+         Channels[_lcID].LCopenTimeout = now + _confirmTime;
+         Channels[_lcID].initialDeposit = _balances;
+
+         emit DidLCOpen(_lcID, msg.sender, _partyI, _balances[0], _token, _balances[1], Channels[_lcID].LCopenTimeout);
+     }
+
+     function LCOpenTimeout(bytes32 _lcID) public {
+         require(msg.sender == Channels[_lcID].partyAddresses[0] && Channels[_lcID].isOpen == false);
+         require(now > Channels[_lcID].LCopenTimeout);
+
+         if(Channels[_lcID].initialDeposit[0] != 0) {
+             
+             Channels[_lcID].partyAddresses[0].transfer(Channels[_lcID].ethBalances[0]);
+         }
+         if(Channels[_lcID].initialDeposit[1] != 0) {
+             
+             require(Channels[_lcID].token.transfer(Channels[_lcID].partyAddresses[0], Channels[_lcID].erc20Balances[0]),"CreateChannel: token transfer failure");
+         }
+
+         emit DidLCClose(_lcID, 0, Channels[_lcID].ethBalances[0], Channels[_lcID].erc20Balances[0], 0, 0);
+
+         // only safe to delete since no action was taken on this channel
+         delete Channels[_lcID];
+     }
+
+     function joinChannel(bytes32 _lcID, uint256[2] _balances) public payable {
+         // require the channel is not open yet
+         require(Channels[_lcID].isOpen == false);
+         require(msg.sender == Channels[_lcID].partyAddresses[1]);
+
+         if(_balances[0] != 0) {
+             require(msg.value == _balances[0], "state balance does not match sent value");
+             Channels[_lcID].ethBalances[1] = msg.value;
+         }
+         if(_balances[1] != 0) {
+             require(Channels[_lcID].token.transferFrom(msg.sender, this, _balances[1]),"joinChannel: token transfer failure");
+             Channels[_lcID].erc20Balances[1] = _balances[1];
+         }
+
+         Channels[_lcID].initialDeposit[0]+=_balances[0];
+         Channels[_lcID].initialDeposit[1]+=_balances[1];
+         // no longer allow joining functions to be called
+         Channels[_lcID].isOpen = true;
+         numChannels++;
+
+         emit DidLCJoin(_lcID, _balances[0], _balances[1]);
+     }
+
+     // additive updates of monetary state
+     // TODO check this for attack vectors
+     function deposit(bytes32 _lcID, address recipient, uint256 _balance, bool isToken) public payable {
+         require(Channels[_lcID].isOpen == true, "Tried adding funds to a closed channel");
+         require(recipient == Channels[_lcID].partyAddresses[0] || recipient == Channels[_lcID].partyAddresses[1]);
+
+         //if(Channels[_lcID].token)
+
+         if (Channels[_lcID].partyAddresses[0] == recipient) {
+             if(isToken) {
+                 require(Channels[_lcID].token.transferFrom(msg.sender, this, _balance),"deposit: token transfer failure");
+                 Channels[_lcID].erc20Balances[2] += _balance;
+             } else {
+                 require(msg.value == _balance, "state balance does not match sent value");
+                 Channels[_lcID].ethBalances[2] += msg.value;
+             }
+         }
+
+         if (Channels[_lcID].partyAddresses[1] == recipient) {
+             if(isToken) {
+                 require(Channels[_lcID].token.transferFrom(msg.sender, this, _balance),"deposit: token transfer failure");
+                 Channels[_lcID].erc20Balances[3] += _balance;
+             } else {
+                 require(msg.value == _balance, "state balance does not match sent value");
+                 Channels[_lcID].ethBalances[3] += msg.value;
+             }
+         }
+
+         emit DidLCDeposit(_lcID, recipient, _balance, isToken);
+     }
+
+     // TODO: Check there are no open virtual channels, the client should have cought this before signing a close LC state update
+     function consensusCloseChannel(
+         bytes32 _lcID,
+         uint256 _sequence,
+         uint256[4] _balances, // 0: ethBalanceA 1:ethBalanceI 2:tokenBalanceA 3:tokenBalanceI
+         string _sigA,
+         string _sigI
+     )
+         public
+     {
+         // assume num open vc is 0 and root hash is 0x0
+         //require(Channels[_lcID].sequence < _sequence);
+         require(Channels[_lcID].isOpen == true);
+         uint256 totalEthDeposit = Channels[_lcID].initialDeposit[0] + Channels[_lcID].ethBalances[2] + Channels[_lcID].ethBalances[3];
+         uint256 totalTokenDeposit = Channels[_lcID].initialDeposit[1] + Channels[_lcID].erc20Balances[2] + Channels[_lcID].erc20Balances[3];
+         require(totalEthDeposit == _balances[0] + _balances[1]);
+         require(totalTokenDeposit == _balances[2] + _balances[3]);
+
+         bytes32 _state = keccak256(
+             abi.encodePacked(
+                 _lcID,
+                 true,
+                 _sequence,
+                 uint256(0),
+                 bytes32(0x0),
+                 Channels[_lcID].partyAddresses[0],
+                 Channels[_lcID].partyAddresses[1],
+                 _balances[0],
+                 _balances[1],
+                 _balances[2],
+                 _balances[3]
+             )
+         );
+
+         require(Channels[_lcID].partyAddresses[0] == ECTools.recoverSigner(_state, _sigA));
+         require(Channels[_lcID].partyAddresses[1] == ECTools.recoverSigner(_state, _sigI));
+
+         Channels[_lcID].isOpen = false;
+
+         if(_balances[0] != 0 || _balances[1] != 0) {
+             Channels[_lcID].partyAddresses[0].transfer(_balances[0]);
+             Channels[_lcID].partyAddresses[1].transfer(_balances[1]);
+         }
+
+         if(_balances[2] != 0 || _balances[3] != 0) {
+             require(Channels[_lcID].token.transfer(Channels[_lcID].partyAddresses[0], _balances[2]),"happyCloseChannel: token transfer failure");
+             require(Channels[_lcID].token.transfer(Channels[_lcID].partyAddresses[1], _balances[3]),"happyCloseChannel: token transfer failure");
+         }
+
+         numChannels--;
+
+         emit DidLCClose(_lcID, _sequence, _balances[0], _balances[1], _balances[2], _balances[3]);
+     }
+
+     // Byzantine functions
+
+     function updateLCstate(
+         bytes32 _lcID,
+         uint256[6] updateParams, // [sequence, numOpenVc, ethbalanceA, ethbalanceI, tokenbalanceA, tokenbalanceI]
+         bytes32 _VCroot,
+         string _sigA,
+         string _sigI
+     )
+         public
+     {
+         Channel storage channel = Channels[_lcID];
+         require(channel.isOpen);
+         require(channel.sequence < updateParams[0]); // do same as vc sequence check
+         require(channel.ethBalances[0] + channel.ethBalances[1] >= updateParams[2] + updateParams[3]);
+         require(channel.erc20Balances[0] + channel.erc20Balances[1] >= updateParams[4] + updateParams[5]);
+
+         if(channel.isUpdateLCSettling == true) {
+             require(channel.updateLCtimeout > now);
+         }
+
+         bytes32 _state = keccak256(
+             abi.encodePacked(
+                 _lcID,
+                 false,
+                 updateParams[0],
+                 updateParams[1],
+                 _VCroot,
+                 channel.partyAddresses[0],
+                 channel.partyAddresses[1],
+                 updateParams[2],
+                 updateParams[3],
+                 updateParams[4],
+                 updateParams[5]
+             )
+         );
+
+         require(channel.partyAddresses[0] == ECTools.recoverSigner(_state, _sigA));
+         require(channel.partyAddresses[1] == ECTools.recoverSigner(_state, _sigI));
+
+         // update LC state
+         channel.sequence = updateParams[0];
+         channel.numOpenVC = updateParams[1];
+         channel.ethBalances[0] = updateParams[2];
+         channel.ethBalances[1] = updateParams[3];
+         channel.erc20Balances[0] = updateParams[4];
+         channel.erc20Balances[1] = updateParams[5];
+         channel.VCrootHash = _VCroot;
+         channel.isUpdateLCSettling = true;
+         channel.updateLCtimeout = now + channel.confirmTime;
+
+         // make settlement flag
+
+         emit DidLCUpdateState (
+             _lcID,
+             updateParams[0],
+             updateParams[1],
+             updateParams[2],
+             updateParams[3],
+             updateParams[4],
+             updateParams[5],
+             _VCroot,
+             channel.updateLCtimeout
+         );
+     }
+
+     // supply initial state of VC to "prime" the force push game
+     function initVCstate(
+         bytes32 _lcID,
+         bytes32 _vcID,
+         bytes _proof,
+         address _partyA,
+         address _partyB,
+         uint256[2] _bond,
+         uint256[4] _balances, // 0: ethBalanceA 1:ethBalanceI 2:tokenBalanceA 3:tokenBalanceI
+         string sigA
+     )
+         public
+     {
+         require(Channels[_lcID].isOpen, "LC is closed.");
+         // sub-channel must be open
+         require(!virtualChannels[_vcID].isClose, "VC is closed.");
+         // Check time has passed on updateLCtimeout and has not passed the time to store a vc state
+         require(Channels[_lcID].updateLCtimeout < now, "LC timeout not over.");
+         // prevent rentry of initializing vc state
+         require(virtualChannels[_vcID].updateVCtimeout == 0);
+         // partyB is now Ingrid
+         bytes32 _initState = keccak256(
+             abi.encodePacked(_vcID, uint256(0), _partyA, _partyB, _bond[0], _bond[1], _balances[0], _balances[1], _balances[2], _balances[3])
+         );
+
+         // Make sure Alice has signed initial vc state (A/B in oldState)
+         require(_partyA == ECTools.recoverSigner(_initState, sigA));
+
+         // Check the oldState is in the root hash
+         require(_isContained(_initState, _proof, Channels[_lcID].VCrootHash) == true);
+
+         virtualChannels[_vcID].partyA = _partyA; // VC participant A
+         virtualChannels[_vcID].partyB = _partyB; // VC participant B
+         virtualChannels[_vcID].sequence = uint256(0);
+         virtualChannels[_vcID].ethBalances[0] = _balances[0];
+         virtualChannels[_vcID].ethBalances[1] = _balances[1];
+         virtualChannels[_vcID].erc20Balances[0] = _balances[2];
+         virtualChannels[_vcID].erc20Balances[1] = _balances[3];
+         virtualChannels[_vcID].bond = _bond;
+         virtualChannels[_vcID].updateVCtimeout = now + Channels[_lcID].confirmTime;
+         virtualChannels[_vcID].isInSettlementState = true;
+
+         emit DidVCInit(_lcID, _vcID, _proof, uint256(0), _partyA, _partyB, _balances[0], _balances[1]);
+     }
+
+     //TODO: verify state transition since the hub did not agree to this state
+     // make sure the A/B balances are not beyond ingrids bonds
+     // Params: vc init state, vc final balance, vcID
+     function settleVC(
+         bytes32 _lcID,
+         bytes32 _vcID,
+         uint256 updateSeq,
+         address _partyA,
+         address _partyB,
+         uint256[4] updateBal, // [ethupdateBalA, ethupdateBalB, tokenupdateBalA, tokenupdateBalB]
+         string sigA
+     )
+         public
+     {
+         require(Channels[_lcID].isOpen, "LC is closed.");
+         // sub-channel must be open
+         require(!virtualChannels[_vcID].isClose, "VC is closed.");
+         require(virtualChannels[_vcID].sequence < updateSeq, "VC sequence is higher than update sequence.");
+         require(
+             virtualChannels[_vcID].ethBalances[1] < updateBal[1] && virtualChannels[_vcID].erc20Balances[1] < updateBal[3],
+             "State updates may only increase recipient balance."
+         );
+         require(
+             virtualChannels[_vcID].bond[0] == updateBal[0] + updateBal[1] &&
+             virtualChannels[_vcID].bond[1] == updateBal[2] + updateBal[3],
+             "Incorrect balances for bonded amount");
+         // Check time has passed on updateLCtimeout and has not passed the time to store a vc state
+         // virtualChannels[_vcID].updateVCtimeout should be 0 on uninitialized vc state, and this should
+         // fail if initVC() isn't called first
+         // require(Channels[_lcID].updateLCtimeout < now && now < virtualChannels[_vcID].updateVCtimeout);
+         require(Channels[_lcID].updateLCtimeout < now); // for testing!
+
+         bytes32 _updateState = keccak256(
+             abi.encodePacked(
+                 _vcID,
+                 updateSeq,
+                 _partyA,
+                 _partyB,
+                 virtualChannels[_vcID].bond[0],
+                 virtualChannels[_vcID].bond[1],
+                 updateBal[0],
+                 updateBal[1],
+                 updateBal[2],
+                 updateBal[3]
+             )
+         );
+
+         // Make sure Alice has signed a higher sequence new state
+         require(virtualChannels[_vcID].partyA == ECTools.recoverSigner(_updateState, sigA));
+
+         // store VC data
+         // we may want to record who is initiating on-chain settles
+         virtualChannels[_vcID].challenger = msg.sender;
+         virtualChannels[_vcID].sequence = updateSeq;
+
+         // channel state
+         virtualChannels[_vcID].ethBalances[0] = updateBal[0];
+         virtualChannels[_vcID].ethBalances[1] = updateBal[1];
+         virtualChannels[_vcID].erc20Balances[0] = updateBal[2];
+         virtualChannels[_vcID].erc20Balances[1] = updateBal[3];
+
+         virtualChannels[_vcID].updateVCtimeout = now + Channels[_lcID].confirmTime;
+
+         emit DidVCSettle(_lcID, _vcID, updateSeq, updateBal[0], updateBal[1], msg.sender, virtualChannels[_vcID].updateVCtimeout);
+     }
+
+     function closeVirtualChannel(bytes32 _lcID, bytes32 _vcID) public {
+         // require(updateLCtimeout > now)
+         require(Channels[_lcID].isOpen, "LC is closed.");
+         require(virtualChannels[_vcID].isInSettlementState, "VC is not in settlement state.");
+         require(virtualChannels[_vcID].updateVCtimeout < now, "Update vc timeout has not elapsed.");
+         require(!virtualChannels[_vcID].isClose, "VC is already closed");
+         // reduce the number of open virtual channels stored on LC
+         Channels[_lcID].numOpenVC--;
+         // close vc flags
+         virtualChannels[_vcID].isClose = true;
+         // re-introduce the balances back into the LC state from the settled VC
+         // decide if this lc is alice or bob in the vc
+         if(virtualChannels[_vcID].partyA == Channels[_lcID].partyAddresses[0]) {
+             Channels[_lcID].ethBalances[0] += virtualChannels[_vcID].ethBalances[0];
+             Channels[_lcID].ethBalances[1] += virtualChannels[_vcID].ethBalances[1];
+
+             Channels[_lcID].erc20Balances[0] += virtualChannels[_vcID].erc20Balances[0];
+             Channels[_lcID].erc20Balances[1] += virtualChannels[_vcID].erc20Balances[1];
+         } else if (virtualChannels[_vcID].partyB == Channels[_lcID].partyAddresses[0]) {
+             Channels[_lcID].ethBalances[0] += virtualChannels[_vcID].ethBalances[1];
+             Channels[_lcID].ethBalances[1] += virtualChannels[_vcID].ethBalances[0];
+
+             Channels[_lcID].erc20Balances[0] += virtualChannels[_vcID].erc20Balances[1];
+             Channels[_lcID].erc20Balances[1] += virtualChannels[_vcID].erc20Balances[0];
+         }
+
+         emit DidVCClose(_lcID, _vcID, virtualChannels[_vcID].erc20Balances[0], virtualChannels[_vcID].erc20Balances[1]);
+     }
+
+     // todo: allow ethier lc.end-user to nullify the settled LC state and return to off-chain
+     function byzantineCloseChannel(bytes32 _lcID) public {
+         Channel storage channel = Channels[_lcID];
+
+         // check settlement flag
+         require(channel.isOpen, "Channel is not open");
+         require(channel.isUpdateLCSettling == true);
+         require(channel.numOpenVC == 0);
+         require(channel.updateLCtimeout < now, "LC timeout over.");
+
+         // if off chain state update didnt reblance deposits, just return to deposit owner
+         uint256 totalEthDeposit = channel.initialDeposit[0] + channel.ethBalances[2] + channel.ethBalances[3];
+         uint256 totalTokenDeposit = channel.initialDeposit[1] + channel.erc20Balances[2] + channel.erc20Balances[3];
+
+         uint256 possibleTotalEthBeforeDeposit = channel.ethBalances[0] + channel.ethBalances[1];
+         uint256 possibleTotalTokenBeforeDeposit = channel.erc20Balances[0] + channel.erc20Balances[1];
+
+         if(possibleTotalEthBeforeDeposit < totalEthDeposit) {
+             channel.ethBalances[0]+=channel.ethBalances[2];
+             channel.ethBalances[1]+=channel.ethBalances[3];
+         } else {
+             require(possibleTotalEthBeforeDeposit == totalEthDeposit);
+         }
+
+         if(possibleTotalTokenBeforeDeposit < totalTokenDeposit) {
+             channel.erc20Balances[0]+=channel.erc20Balances[2];
+             channel.erc20Balances[1]+=channel.erc20Balances[3];
+         } else {
+             require(possibleTotalTokenBeforeDeposit == totalTokenDeposit);
+         }
+
+         // reentrancy
+         uint256 ethbalanceA = channel.ethBalances[0];
+         uint256 ethbalanceI = channel.ethBalances[1];
+         uint256 tokenbalanceA = channel.erc20Balances[0];
+         uint256 tokenbalanceI = channel.erc20Balances[1];
+
+         channel.ethBalances[0] = 0;
+         channel.ethBalances[1] = 0;
+         channel.erc20Balances[0] = 0;
+         channel.erc20Balances[1] = 0;
+
+         if(ethbalanceA != 0 || ethbalanceI != 0) {
+             channel.partyAddresses[0].transfer(ethbalanceA);
+             channel.partyAddresses[1].transfer(ethbalanceI);
+         }
+
+         if(tokenbalanceA != 0 || tokenbalanceI != 0) {
+             require(
+                 channel.token.transfer(channel.partyAddresses[0], tokenbalanceA),
+                 "byzantineCloseChannel: token transfer failure"
+             );
+             require(
+                 channel.token.transfer(channel.partyAddresses[1], tokenbalanceI),
+                 "byzantineCloseChannel: token transfer failure"
+             );
+         }
+
+         channel.isOpen = false;
+         numChannels--;
+
+         emit DidLCClose(_lcID, channel.sequence, ethbalanceA, ethbalanceI, tokenbalanceA, tokenbalanceI);
+     }
+
+     function _isContained(bytes32 _hash, bytes _proof, bytes32 _root) internal pure returns (bool) {
+         bytes32 cursor = _hash;
+         bytes32 proofElem;
+
+         for (uint256 i = 64; i <= _proof.length; i += 32) {
+             assembly { proofElem := mload(add(_proof, i)) }
+
+             if (cursor < proofElem) {
+                 cursor = keccak256(abi.encodePacked(cursor, proofElem));
+             } else {
+                 cursor = keccak256(abi.encodePacked(proofElem, cursor));
+             }
+         }
+
+         return cursor == _root;
+     }
+
+     //Struct Getters
+     function getChannel(bytes32 id) public view returns (
+         address[2],
+         uint256[4],
+         uint256[4],
+         uint256[2],
+         uint256,
+         uint256,
+         bytes32,
+         uint256,
+         uint256,
+         bool,
+         bool,
+         uint256
+     ) {
+         Channel memory channel = Channels[id];
+         return (
+             channel.partyAddresses,
+             channel.ethBalances,
+             channel.erc20Balances,
+             channel.initialDeposit,
+             channel.sequence,
+             channel.confirmTime,
+             channel.VCrootHash,
+             channel.LCopenTimeout,
+             channel.updateLCtimeout,
+             channel.isOpen,
+             channel.isUpdateLCSettling,
+             channel.numOpenVC
+         );
+     }
+
+     function getVirtualChannel(bytes32 id) public view returns(
+         bool,
+         bool,
+         uint256,
+         address,
+         uint256,
+         address,
+         address,
+         address,
+         uint256[2],
+         uint256[2],
+         uint256[2]
+     ) {
+         VirtualChannel memory virtualChannel = virtualChannels[id];
+         return(
+             virtualChannel.isClose,
+             virtualChannel.isInSettlementState,
+             virtualChannel.sequence,
+             virtualChannel.challenger,
+             virtualChannel.updateVCtimeout,
+             virtualChannel.partyA,
+             virtualChannel.partyB,
+             virtualChannel.partyI,
+             virtualChannel.ethBalances,
+             virtualChannel.erc20Balances,
+             virtualChannel.bond
+         );
+     }
+ }
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (reentrancy)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (reentrancy)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

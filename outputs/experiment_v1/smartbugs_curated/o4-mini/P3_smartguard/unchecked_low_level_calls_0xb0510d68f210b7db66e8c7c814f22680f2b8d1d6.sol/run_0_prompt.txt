@@ -1,0 +1,1256 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: TIME_MANIPULATION VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity 0.4.21;
+
+ 
+ 
+ 
+contract Ownable {
+    address public owner;
+    address public newOwner;
+
+    event OwnershipTransferred(address indexed _from, address indexed _to);
+
+    function Ownable() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address _newOwner) public onlyOwner {
+        newOwner = _newOwner;
+    }
+    function acceptOwnership() public {
+        require(msg.sender == newOwner);
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+        newOwner = address(0);
+    }
+}
+
+
+contract Pausable is Ownable {
+	event Pause();
+	event Unpause();
+
+	bool public paused = false;
+
+
+	 
+	modifier whenNotPaused() {
+		require(!paused);
+		_;
+	}
+
+	 
+	modifier whenPaused {
+		require(paused);
+		_;
+	}
+
+	 
+	function pause() onlyOwner whenNotPaused public returns (bool) {
+		paused = true;
+		emit Pause();
+		return true;
+	}
+
+	 
+	function unpause() onlyOwner whenPaused public returns (bool) {
+		paused = false;
+		emit Unpause();
+		return true;
+	}
+}
+
+ 
+library SafeMath {
+
+   
+  function mul(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    if (a == 0) {
+      return 0;
+    }
+    c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+   
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+     
+     
+     
+    return a / b;
+  }
+
+   
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+   
+  function add(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+library ContractLib {
+	 
+	function isContract(address _addr) internal view returns (bool) {
+		uint length;
+		assembly {
+			 
+			length := extcodesize(_addr)
+		}
+		return (length>0);
+	}
+}
+
+ 
+ 
+contract ContractReceiver {
+	function tokenFallback(address _from, uint _value, bytes _data) public pure;
+}
+
+ 
+ 
+ 
+ 
+contract ERC20Interface {
+	function totalSupply() public constant returns (uint);
+	function balanceOf(address tokenOwner) public constant returns (uint);
+	function allowance(address tokenOwner, address spender) public constant returns (uint);
+	function transfer(address to, uint tokens) public returns (bool);
+	function approve(address spender, uint tokens) public returns (bool);
+	function transferFrom(address from, address to, uint tokens) public returns (bool);
+
+	function name() public constant returns (string);
+	function symbol() public constant returns (string);
+	function decimals() public constant returns (uint8);
+
+	event Transfer(address indexed from, address indexed to, uint tokens);
+	event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
+}
+
+
+  
+ 
+
+  
+ 
+contract ERC223 is ERC20Interface {
+	function transfer(address to, uint value, bytes data) public returns (bool);
+	
+	event Transfer(address indexed from, address indexed to, uint tokens);
+	event Transfer(address indexed from, address indexed to, uint value, bytes data);
+}
+
+ 
+contract NXX is ERC223, Pausable {
+
+	using SafeMath for uint256;
+	using ContractLib for address;
+
+	mapping(address => uint) balances;
+	mapping(address => mapping(address => uint)) allowed;
+	
+	string public name;
+	string public symbol;
+	uint8 public decimals;
+	uint256 public totalSupply;
+
+	event Burn(address indexed from, uint256 value);
+	
+	 
+	 
+	 
+	function NXX() public {
+		symbol = "NASHXX";
+		name = "XXXX CASH";
+		decimals = 18;
+		totalSupply = 100000000000 * 10**uint(decimals);
+		balances[msg.sender] = totalSupply;
+		emit Transfer(address(0), msg.sender, totalSupply);
+	}
+	
+	
+	 
+	function name() public constant returns (string) {
+		return name;
+	}
+	 
+	function symbol() public constant returns (string) {
+		return symbol;
+	}
+	 
+	function decimals() public constant returns (uint8) {
+		return decimals;
+	}
+	 
+	function totalSupply() public constant returns (uint256) {
+		return totalSupply;
+	}
+	
+	 
+	function transfer(address _to, uint _value, bytes _da
+```
+
+**Security Analysis:**
+Here’s the bottom-line:
+
+1. No use of block.timestamp, now or block.number  
+   – None of the Ownable, Pausable, SafeMath, ContractLib or ERC-223 routines you showed ever reads or compares against a timestamp or block number.
+
+2. When “time_manipulation” is a real issue  
+   – You have logic that does something (permit, forbid or change pricing) exactly when now >= T or block.number >= N (or vice-versa).  
+   – A miner can then nudge the timestamp by several seconds (or with collusion, more) to push your transaction just before or after your cutoff.
+
+3. Why it doesn’t apply here  
+   – Since your code never checks any time variable, there is literally no time-based branch a miner can abuse.  
+   – All your guards are ownership checks (onlyOwner) or pause flags (whenNotPaused), not timestamp checks.
+
+Conclusion  
+• The “time_manipulation” label was a misclassification in this context.  
+• No timestamp-based logic means no time-skew attack vector.  
+• You can safely remove that finding or mark it as a false positive.
+
+
+**Classification**: This code contains a **time_manipulation** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+//author : dm & w
+pragma solidity ^0.4.23;
+
+library SafeMath {
+  	function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+		if (a == 0) {
+		return 0;
+		}
+		uint256 c = a * b;
+		assert(c / a == b);
+		return c;
+	}
+
+  	function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    	uint256 c = a / b;
+    	return c;
+  	}
+
+  	function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    	assert(b <= a);
+    	return a - b;
+  	}
+
+  	function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    	uint256 c = a + b;
+    	assert(c >= a);
+    	return c;
+  	}
+}
+
+contract ERC20 {
+  	function transfer(address _to, uint256 _value) public returns (bool success);
+  	function balanceOf(address _owner) public constant returns (uint256 balance);
+}
+
+contract Controller {
+
+	address public owner;
+
+	modifier onlyOwner {
+    	require(msg.sender == owner);
+    	_;
+  	}
+
+  	function change_owner(address new_owner) onlyOwner {
+    	require(new_owner != 0x0);
+    	owner = new_owner;
+  	}
+
+  	function Controller() {
+    	owner = msg.sender;
+  	}
+}
+
+contract Contract is Controller {
+
+	using SafeMath for uint256;
+
+  	struct Contributor {
+		uint256 balance;
+	    uint256 fee_owner;
+		uint256 fee_devs;
+	    uint8 rounds;
+	    bool whitelisted;
+  	}
+
+	struct Snapshot {
+		uint256 tokens_balance;
+		uint256 eth_balance;
+	}
+
+  	modifier underMaxAmount {
+    	require(max_amount == 0 || this.balance <= max_amount);
+    	_;
+  	}
+
+	address constant public DEVELOPER1 = 0x8C006d807EBAe91F341a4308132Fd756808e0126;
+	address constant public DEVELOPER2 = 0x63F7547Ac277ea0B52A0B060Be6af8C5904953aa;
+	uint256 constant public FEE_DEV = 670;
+
+	uint256 public FEE_OWNER;
+	uint256 public max_amount;
+	uint256 public individual_cap;
+	uint256 public gas_price_max;
+	uint8 public rounds;
+	bool public whitelist_enabled;
+
+	mapping (address => Contributor) public contributors;
+	Snapshot[] public snapshots;
+	uint256[] public total_fees;
+
+	uint256 public const_contract_eth_value;
+	uint256 public percent_reduction;
+
+	address public sale;
+	ERC20 public token;
+	bool public bought_tokens;
+	bool public owner_supplied_eth;
+	bool public allow_contributions = true;
+	bool public allow_refunds;
+  //============================
+
+	constructor(
+		uint256 _max_amount,
+		bool _whitelist,
+		uint256 _owner_fee_divisor
+		) {
+			FEE_OWNER = _owner_fee_divisor;
+			max_amount = calculate_with_fees(_max_amount);
+		  	whitelist_enabled = _whitelist;
+		  	Contributor storage contributor = contributors[msg.sender];
+		  	contributor.whitelisted = true;
+			total_fees.length = 2;
+  		}
+
+
+	function buy_the_tokens(bytes _data) onlyOwner {
+		require(!bought_tokens && sale != 0x0);
+		bought_tokens = true;
+		const_contract_eth_value = this.balance;
+		take_fees_eth_dev();
+		take_fees_eth_owner();
+		const_contract_eth_value = this.balance;
+		require(sale.call.gas(msg.gas).value(this.balance)(_data));
+	}
+
+	function whitelist_addys(address[] _addys, bool _state) onlyOwner {
+		for (uint256 i = 0; i < _addys.length; i++) {
+			Contributor storage contributor = contributors[_addys[i]];
+			contributor.whitelisted = _state;
+		}
+	}
+
+	function force_refund(address _addy) onlyOwner {
+		refund(_addy);
+	}
+
+	function force_partial_refund(address _addy) onlyOwner {
+		partial_refund(_addy);
+	}
+
+	function set_gas_price_max(uint256 _gas_price) onlyOwner {
+		gas_price_max = _gas_price;
+	}
+
+	function set_sale_address(address _sale) onlyOwner {
+		require(_sale != 0x0);
+		sale = _sale;
+	}
+
+	function set_token_address(address _token) onlyOwner {
+		require(_token != 0x0);
+		token = ERC20(_token);
+	}
+
+	function set_allow_contributions(bool _boolean) onlyOwner {
+		allow_contributions = _boolean;
+	}
+
+	function set_allow_refunds(bool _boolean) onlyOwner {
+		allow_refunds = _boolean;
+	}
+
+	function set_tokens_received() onlyOwner {
+		tokens_received();
+	}
+
+	function set_percent_reduction(uint256 _reduction) onlyOwner payable {
+		require(bought_tokens && rounds == 0 && _reduction <= 100);
+		percent_reduction = _red
+```
+
+**Security Analysis:**
+Here’s a distilled, final answer after a second pass through the code you’ve shown:
+
+1) No unchecked arithmetic  
+   • Every `+`, `-` and `*` is behind SafeMath, so over/underflows are effectively impossible.  
+
+2) No reentrancy on the critical path  
+   • The flag `bought_tokens[msg.sender] = true` is set before any external call.  
+   • After the low‐level `.call` into the sale contract, there are no further state writes.  
+
+3) External calls are checked  
+   • Each low‐level `to.call.value(...)( )` is wrapped in `require(...)`. If the fee‐split or the sale contract call fails, the transaction reverts.  
+
+4) Access controls line up  
+   • Only the owner can change critical parameters (token/sale address, fees, caps, whitelist).  
+   • The owner address itself cannot be zero.  
+
+5) “Oddities” aren’t exploitable by outsiders  
+   • Using `msg.gas` to forward the remaining gas is brittle (and discouraged in modern Solidity), but it does not open a new exploit path here.  
+   • If the owner accidentally sets a fee divisor to zero, the contract will revert on any fee or cap calculation—this is a configuration‐time mistake, not something an attacker can force in flight.  
+
+6) Missing parts could hide issues—but none are shown  
+   • We haven’t seen the implementations of `refund(...)`, `partial_refund(...)` or `take_fees_eth_dev()`. Those *could* contain logic bugs or reentrancy, so you’ll want to audit them separately.  
+
+Conclusion  
+Based solely on the code you’ve provided: there is no reentrancy, no unchecked external calls, no overflow/underflow, and no privilege‐escalation vector for an external user. The only “failure modes” are misconfiguration by the owner or unshown helper functions.  
+
+Final verdict: SAFE (given only the shown code)
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+//author : dm & w
+pragma solidity ^0.4.23;
+
+library SafeMath {
+  	function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+		if (a == 0) {
+		return 0;
+		}
+		uint256 c = a * b;
+		assert(c / a == b);
+		return c;
+	}
+
+  	function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    	uint256 c = a / b;
+    	return c;
+  	}
+
+  	function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    	assert(b <= a);
+    	return a - b;
+  	}
+
+  	function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    	uint256 c = a + b;
+    	assert(c >= a);
+    	return c;
+  	}
+}
+
+contract ERC20 {
+  	function transfer(address _to, uint256 _value) public returns (bool success);
+  	function balanceOf(address _owner) public constant returns (uint256 balance);
+}
+
+contract Controller {
+
+	address public owner;
+
+	modifier onlyOwner {
+    	require(msg.sender == owner);
+    	_;
+  	}
+
+  	function change_owner(address new_owner) onlyOwner {
+    	require(new_owner != 0x0);
+    	owner = new_owner;
+  	}
+
+  	function Controller() {
+    	owner = msg.sender;
+  	}
+}
+
+contract Contract is Controller {
+
+	using SafeMath for uint256;
+
+  	struct Contributor {
+		uint256 balance;
+	    uint256 fee_owner;
+		uint256 fee_devs;
+	    uint8 rounds;
+	    bool whitelisted;
+  	}
+
+	struct Snapshot {
+		uint256 tokens_balance;
+		uint256 eth_balance;
+	}
+
+  	modifier underMaxAmount {
+    	require(max_amount == 0 || this.balance <= max_amount);
+    	_;
+  	}
+
+	address constant public DEVELOPER1 = 0x8C006d807EBAe91F341a4308132Fd756808e0126;
+	address constant public DEVELOPER2 = 0x63F7547Ac277ea0B52A0B060Be6af8C5904953aa;
+	uint256 constant public FEE_DEV = 670;
+
+	uint256 public FEE_OWNER;
+	uint256 public max_amount;
+	uint256 public individual_cap;
+	uint256 public gas_price_max;
+	uint8 public rounds;
+	bool public whitelist_enabled;
+
+	mapping (address => Contributor) public contributors;
+	Snapshot[] public snapshots;
+	uint256[] public total_fees;
+
+	uint256 public const_contract_eth_value;
+	uint256 public percent_reduction;
+
+	address public sale;
+	ERC20 public token;
+	bool public bought_tokens;
+	bool public owner_supplied_eth;
+	bool public allow_contributions = true;
+	bool public allow_refunds;
+  //============================
+
+	constructor(
+		uint256 _max_amount,
+		bool _whitelist,
+		uint256 _owner_fee_divisor
+		) {
+			FEE_OWNER = _owner_fee_divisor;
+			max_amount = calculate_with_fees(_max_amount);
+		  	whitelist_enabled = _whitelist;
+		  	Contributor storage contributor = contributors[msg.sender];
+		  	contributor.whitelisted = true;
+			total_fees.length = 2;
+  		}
+
+
+	function buy_the_tokens(bytes _data) onlyOwner {
+		require(!bought_tokens && sale != 0x0);
+		bought_tokens = true;
+		const_contract_eth_value = this.balance;
+		take_fees_eth_dev();
+		take_fees_eth_owner();
+		const_contract_eth_value = this.balance;
+		require(sale.call.gas(msg.gas).value(this.balance)(_data));
+	}
+
+	function whitelist_addys(address[] _addys, bool _state) onlyOwner {
+		for (uint256 i = 0; i < _addys.length; i++) {
+			Contributor storage contributor = contributors[_addys[i]];
+			contributor.whitelisted = _state;
+		}
+	}
+
+	function force_refund(address _addy) onlyOwner {
+		refund(_addy);
+	}
+
+	function force_partial_refund(address _addy) onlyOwner {
+		partial_refund(_addy);
+	}
+
+	function set_gas_price_max(uint256 _gas_price) onlyOwner {
+		gas_price_max = _gas_price;
+	}
+
+	function set_sale_address(address _sale) onlyOwner {
+		require(_sale != 0x0);
+		sale = _sale;
+	}
+
+	function set_token_address(address _token) onlyOwner {
+		require(_token != 0x0);
+		token = ERC20(_token);
+	}
+
+	function set_allow_contributions(bool _boolean) onlyOwner {
+		allow_contributions = _boolean;
+	}
+
+	function set_allow_refunds(bool _boolean) onlyOwner {
+		allow_refunds = _boolean;
+	}
+
+	function set_tokens_received() onlyOwner {
+		tokens_received();
+	}
+
+	function set_percent_reduction(uint256 _reduction) onlyOwner payable {
+		require(bought_tokens && rounds == 0 && _reduction <= 100);
+		percent_reduction = _red
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Yes—your write-up correctly pinpoints the bug, clearly walks through how an attacker abuses it, and states exactly when it can happen. Here’s a polished, concise version:
+
+1. Vulnerable code pattern  
+   • Using the low-level call form:  
+     _addy.call.value(amount)()  
+   • Not checking its return value (the `bool`).  
+   • Updating user balances before the call, so a failed send leaves state already “spent.”
+
+2. Why it’s dangerous  
+   • In Solidity/EVM, `.call.value(...)()` forwards ether but does not revert the caller if the callee’s fallback fails or runs out of gas—it simply returns `false`.  
+   • If you ignore that `false`, your contract assumes the payment succeeded even when it didn’t.
+
+3. Exploit scenario  
+   1. Attacker deploys a contract whose fallback always reverts (or demands more than 2,300 gas).  
+   2. They deposit funds and get a positive balance in `contributors[attacker]`.  
+   3. When `refund(attacker)` or `partial_refund(attacker)` runs, the code:  
+      – Sets `contributors[attacker].balance` to zero (or reduces it)  
+      – Calls `attacker.call.value(toSend)()`  
+      – Fallback reverts, `call` returns false, but the outer function does not revert  
+   4. Result: attacker’s recorded balance is gone, and the ether remains stuck in the contract.
+
+4. Conditions enabling the exploit  
+   • Use of unchecked `.call.value(...)()` for payments  
+   • State updated before the external call  
+   • Recipient fallback can revert or exhaust stipend
+
+5. Mitigations  
+   • Prefer `require(payable(addr).send(amount))` or `payable(addr).transfer(amount)` (transfer automatically reverts on failure).  
+   • If you must use `.call`, wrap it in `require(...)`:  
+     require(addr.call.value(amount)())  
+   • Always follow the Checks-Effects-Interactions pattern in the correct order:  
+     – Check conditions  
+     – Interact (external call)  
+     – Then update internal state (or vice-versa with a `require` around the external call)  
+   • Better yet, use a pull-over-push refund model so users withdraw funds themselves.
+
+This ensures any failed send reverts the transaction and prevents funds from getting silently “burned.”
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 4: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.15;
+
+contract MultiOwner {
+    /* Constructor */
+    event OwnerAdded(address newOwner);
+    event OwnerRemoved(address oldOwner);
+	event RequirementChanged(uint256 newRequirement);
+	
+    uint256 public ownerRequired;
+    mapping (address => bool) public isOwner;
+	mapping (address => bool) public RequireDispose;
+	address[] owners;
+	
+	function MultiOwner(address[] _owners, uint256 _required) public {
+        ownerRequired = _required;
+        isOwner[msg.sender] = true;
+        owners.push(msg.sender);
+        
+        for (uint256 i = 0; i < _owners.length; ++i){
+			require(!isOwner[_owners[i]]);
+			isOwner[_owners[i]] = true;
+			owners.push(_owners[i]);
+        }
+    }
+    
+	modifier onlyOwner {
+	    require(isOwner[msg.sender]);
+        _;
+    }
+    
+	modifier ownerDoesNotExist(address owner) {
+		require(!isOwner[owner]);
+        _;
+    }
+
+    modifier ownerExists(address owner) {
+		require(isOwner[owner]);
+        _;
+    }
+    
+    function addOwner(address owner) onlyOwner ownerDoesNotExist(owner) external{
+        isOwner[owner] = true;
+        owners.push(owner);
+        OwnerAdded(owner);
+    }
+    
+	function numberOwners() public constant returns (uint256 NumberOwners){
+	    NumberOwners = owners.length;
+	}
+	
+    function removeOwner(address owner) onlyOwner ownerExists(owner) external{
+		require(owners.length > 2);
+        isOwner[owner] = false;
+		RequireDispose[owner] = false;
+        for (uint256 i=0; i<owners.length - 1; i++){
+            if (owners[i] == owner) {
+				owners[i] = owners[owners.length - 1];
+                break;
+            }
+		}
+		owners.length -= 1;
+        OwnerRemoved(owner);
+    }
+    
+	function changeRequirement(uint _newRequired) onlyOwner external {
+		require(_newRequired >= owners.length);
+        ownerRequired = _newRequired;
+        RequirementChanged(_newRequired);
+    }
+	
+	function ConfirmDispose() onlyOwner() returns (bool){
+		uint count = 0;
+		for (uint i=0; i<owners.length - 1; i++)
+            if (RequireDispose[owners[i]])
+                count += 1;
+            if (count == ownerRequired)
+                return true;
+	}
+	
+	function kill() onlyOwner(){
+		RequireDispose[msg.sender] = true;
+		if(ConfirmDispose()){
+			selfdestruct(msg.sender);
+		}
+    }
+}
+
+contract VVToken is MultiOwner{
+	event SubmitTransaction(bytes32 transactionHash);
+	event Confirmation(address sender, bytes32 transactionHash);
+	event Execution(bytes32 transactionHash);
+	event FrozenFunds(address target, bool frozen);
+	event Transfer(address indexed from, address indexed to, uint256 value);
+	event FeePaid(address indexed from, address indexed to, uint256 value);
+	event VoidAccount(address indexed from, address indexed to, uint256 value);
+	event Bonus(uint256 value);
+	event Burn(uint256 value);
+	
+	string public name = "VV Coin";
+	string public symbol = "VVI";
+	uint8 public decimals = 8;
+	uint256 public totalSupply = 3000000000 * 10 ** uint256(decimals);
+	uint256 public EthPerToken = 300000;
+	uint256 public ChargeFee = 2;
+	
+	mapping(address => uint256) public balanceOf;
+	mapping(address => bool) public frozenAccount;
+	mapping (bytes32 => mapping (address => bool)) public Confirmations;
+	mapping (bytes32 => Transaction) public Transactions;
+	
+	struct Transaction {
+		address destination;
+		uint value;
+		bytes data;
+		bool executed;
+    }
+	
+	modifier notNull(address destination) {
+		require (destination != 0x0);
+        _;
+    }
+	
+	modifier confirmed(bytes32 transactionHash) {
+		require (Confirmations[transactionHash][msg.sender]);
+        _;
+    }
+
+    modifier notConfirmed(bytes32 transactionHash) {
+		require (!Confirmations[transactionHash][msg.sender]);
+        _;
+    }
+	
+	modifier notExecuted(bytes32 TransHash) {
+		require (!Transactions[TransHash].executed);
+        _;
+    }
+    
+	function VVToken(address[] _owners, uint256 _required) MultiOwner(_owners, _required) public {
+		balanceOf[msg.sender] = totalSupply;                    
+    }
+	
+	/* Internal transfer, only can be called by this c
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Here is a concise, accurate and complete restatement of the issue, the exploit mechanics, the conditions needed, and the one-line fix.
+
+1. The vulnerable pattern  
+   In most multisig wallets you’ll find code like this in executeTransaction(...):  
+     • it checks owners and confirmations  
+     • it checks the contract has enough Ether  
+     • THEN it does  
+       if (txn.destination.call.value(txn.value)(txn.data)) {  
+         txn.executed = true;  
+         Execution(txHash);  
+       }  
+   Notice that the external call into txn.destination happens *before* the contract flips txn.executed to true.
+
+2. How the re-entrancy attack works  
+   a. The attacker submits a “transfer” transaction pointing to their malicious contract (and gets the normal number of owner confirmations).  
+   b. An owner calls executeTransaction(txHash). The multisig passes the “not executed” check, has enough balance, and does the external call.value(...) into the attacker’s fallback.  
+   c. Inside the fallback, the attacker immediately calls back into executeTransaction(txHash) again. Because txn.executed is still false, the multisig sends the same funds again.  
+   d. The attacker loops this re-entry until the wallet is drained (or out of gas). Only after all re-entries unwind does the original call finally set txn.executed to true—too late.
+
+3. Conditions for exploitation  
+   • The multisig must perform an external call into user-supplied code before updating its own “executed” flag.  
+   • The attacker must be able to point a confirmed transaction at a contract they control.  
+   • The fallback or invoked function in the attacker’s contract must re-enter the multisig’s executeTransaction with the same txHash.
+
+4. The one-line fix (Checks-Effects-Interactions)  
+   Before making any external call, immediately update your state:  
+     txn.executed = true;  
+     if (txn.destination.call.value(txn.value)(txn.data)) {  
+       Execution(txHash);  
+     } else {  
+       // optional: revert or reset txn.executed = false and emit a failure event  
+     }  
+   By flipping txn.executed first, any re-entry attempt hits require(!txn.executed) and reverts, closing the window.
+
+Summary  
+– The original explanation correctly pinpoints the external-call-before-state-change bug.  
+– The attack vector is laid out step by step.  
+– The exploit conditions (external call to attacker code, delayed flag update) are fully described.  
+– The one-line reorder fix enforces the Checks-Effects-Interactions pattern, eliminating the re-entrancy hole.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 5: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.15;
+
+contract MultiOwner {
+    /* Constructor */
+    event OwnerAdded(address newOwner);
+    event OwnerRemoved(address oldOwner);
+	event RequirementChanged(uint256 newRequirement);
+	
+    uint256 public ownerRequired;
+    mapping (address => bool) public isOwner;
+	mapping (address => bool) public RequireDispose;
+	address[] owners;
+	
+	function MultiOwner(address[] _owners, uint256 _required) public {
+        ownerRequired = _required;
+        isOwner[msg.sender] = true;
+        owners.push(msg.sender);
+        
+        for (uint256 i = 0; i < _owners.length; ++i){
+			require(!isOwner[_owners[i]]);
+			isOwner[_owners[i]] = true;
+			owners.push(_owners[i]);
+        }
+    }
+    
+	modifier onlyOwner {
+	    require(isOwner[msg.sender]);
+        _;
+    }
+    
+	modifier ownerDoesNotExist(address owner) {
+		require(!isOwner[owner]);
+        _;
+    }
+
+    modifier ownerExists(address owner) {
+		require(isOwner[owner]);
+        _;
+    }
+    
+    function addOwner(address owner) onlyOwner ownerDoesNotExist(owner) external{
+        isOwner[owner] = true;
+        owners.push(owner);
+        OwnerAdded(owner);
+    }
+    
+	function numberOwners() public constant returns (uint256 NumberOwners){
+	    NumberOwners = owners.length;
+	}
+	
+    function removeOwner(address owner) onlyOwner ownerExists(owner) external{
+		require(owners.length > 2);
+        isOwner[owner] = false;
+		RequireDispose[owner] = false;
+        for (uint256 i=0; i<owners.length - 1; i++){
+            if (owners[i] == owner) {
+				owners[i] = owners[owners.length - 1];
+                break;
+            }
+		}
+		owners.length -= 1;
+        OwnerRemoved(owner);
+    }
+    
+	function changeRequirement(uint _newRequired) onlyOwner external {
+		require(_newRequired >= owners.length);
+        ownerRequired = _newRequired;
+        RequirementChanged(_newRequired);
+    }
+	
+	function ConfirmDispose() onlyOwner() returns (bool){
+		uint count = 0;
+		for (uint i=0; i<owners.length - 1; i++)
+            if (RequireDispose[owners[i]])
+                count += 1;
+            if (count == ownerRequired)
+                return true;
+	}
+	
+	function kill() onlyOwner(){
+		RequireDispose[msg.sender] = true;
+		if(ConfirmDispose()){
+			selfdestruct(msg.sender);
+		}
+    }
+}
+
+contract VVToken is MultiOwner{
+	event SubmitTransaction(bytes32 transactionHash);
+	event Confirmation(address sender, bytes32 transactionHash);
+	event Execution(bytes32 transactionHash);
+	event FrozenFunds(address target, bool frozen);
+	event Transfer(address indexed from, address indexed to, uint256 value);
+	event FeePaid(address indexed from, address indexed to, uint256 value);
+	event VoidAccount(address indexed from, address indexed to, uint256 value);
+	event Bonus(uint256 value);
+	event Burn(uint256 value);
+	
+	string public name = "VV Coin";
+	string public symbol = "VVI";
+	uint8 public decimals = 8;
+	uint256 public totalSupply = 3000000000 * 10 ** uint256(decimals);
+	uint256 public EthPerToken = 300000;
+	uint256 public ChargeFee = 2;
+	
+	mapping(address => uint256) public balanceOf;
+	mapping(address => bool) public frozenAccount;
+	mapping (bytes32 => mapping (address => bool)) public Confirmations;
+	mapping (bytes32 => Transaction) public Transactions;
+	
+	struct Transaction {
+		address destination;
+		uint value;
+		bytes data;
+		bool executed;
+    }
+	
+	modifier notNull(address destination) {
+		require (destination != 0x0);
+        _;
+    }
+	
+	modifier confirmed(bytes32 transactionHash) {
+		require (Confirmations[transactionHash][msg.sender]);
+        _;
+    }
+
+    modifier notConfirmed(bytes32 transactionHash) {
+		require (!Confirmations[transactionHash][msg.sender]);
+        _;
+    }
+	
+	modifier notExecuted(bytes32 TransHash) {
+		require (!Transactions[TransHash].executed);
+        _;
+    }
+    
+	function VVToken(address[] _owners, uint256 _required) MultiOwner(_owners, _required) public {
+		balanceOf[msg.sender] = totalSupply;                    
+    }
+	
+	/* Internal transfer, only can be called by this c
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Yes—your write-up correctly pinpoints the risky code, clearly shows how an attacker can lock funds, and lists all the necessary preconditions. Here’s a polished, end-to-end explanation:
+
+1. Vulnerable Code Pattern  
+   • In executeTransaction, the multisig does  
+     t.destination.call.value(t.value)(t.data);  
+     without ever checking the returned boolean.  
+   • It then unconditionally sets t.executed = true and emits Execution(txHash).
+
+2. Why That Is Dangerous  
+   • Low-level call(…) returns false on failure but does not revert.  
+   • By ignoring the return value, the multisig believes it succeeded even when it didn’t.  
+   • Once t.executed is true, the transaction can’t be retried or refunded.
+
+3. Attack Scenario  
+   a. An owner submits a transaction targeting a malicious (or buggy) contract with a fallback that always reverts or exhausts gas.  
+   b. The other owners confirm the transaction.  
+   c. executeTransaction() dispatches the .call, which fails and returns false.  
+   d. The multisig marks the txHash “executed,” emits Execution, and stops any further action.  
+   e. The Ether or token balance never leaves the multisig—and can never be recovered under that txHash.
+
+4. Conditions for Exploitation  
+   • Using address.call.value(...) / .call(...) instead of transfer or a checked call.  
+   • No require(success) or if (!success) revert() after the call.  
+   • The target contract is attacker-controlled or unpredictable, with a failing fallback.  
+   • The multisig logic forbids re-execution once executed==true.
+
+Takeaway: always capture and enforce the boolean success flag when using low-level .call. Without it, you risk silent failures that corrupt your contract’s bookkeeping and permanently lock assets.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.23;
+
+contract Splitter{
+    
+	address public owner;
+	address[] public puppets;
+	mapping (uint256 => address) public extra;
+	address private _addy;
+	uint256 private _share;
+	uint256 private _count;
+
+//constructor
+
+	constructor() payable public{
+		owner = msg.sender;
+		newPuppet();
+		newPuppet();
+		newPuppet();
+		newPuppet();
+		extra[0] = puppets[0];
+        extra[1] = puppets[1];
+        extra[2] = puppets[2];
+        extra[3] = puppets[3];
+	}
+
+//withdraw (just in case)
+	
+	function withdraw() public{
+		require(msg.sender == owner);
+		owner.transfer(address(this).balance);
+	}
+
+//puppet count
+
+	function getPuppetCount() public constant returns(uint256 puppetCount){
+    	return puppets.length;
+  	}
+
+//deploy contracts
+
+	function newPuppet() public returns(address newPuppet){
+	    require(msg.sender == owner);
+    	Puppet p = new Puppet();
+    	puppets.push(p);
+    	return p;
+  		}
+ 
+//update mapping
+
+    function setExtra(uint256 _id, address _newExtra) public {
+        require(_newExtra != address(0));
+        extra[_id] = _newExtra;
+    }
+
+//fund puppets TROUBLESHOOT gas
+
+    function fundPuppets() public payable {
+        require(msg.sender == owner);
+    	_share = SafeMath.div(msg.value, 4);
+		
+        extra[0].call.value(_share).gas(800000)();
+		
+        extra[1].call.value(_share).gas(800000)();
+		
+        extra[2].call.value(_share).gas(800000)();
+		
+        extra[3].call.value(_share).gas(800000)();
+        }
+        
+//fallback function
+
+function() payable public{
+	}
+}
+
+contract Puppet {
+    
+    mapping (uint256 => address) public target;
+    mapping (uint256 => address) public master;
+	
+	constructor() payable public{
+		//target[0] = 0x42D21d1182F3aDD44064F23c1F98843D4B9fd8aa;
+		target[0] = 0x509Cb8cB2F8ba04aE81eEC394175707Edd37e109;
+        master[0] = 0x5C035Bb4Cb7dacbfeE076A5e61AA39a10da2E956;
+	}
+	
+	//send shares to doubler
+	//return profit to master
+
+	function() public payable{
+	    if(msg.sender != target[0]){
+			
+			target[0].call.value(msg.value).gas(600000)();
+		}
+    }
+	//emergency withdraw
+
+	function withdraw() public{
+		require(msg.sender == master[0]);
+		master[0].transfer(address(this).balance);
+	}
+}
+
+//library
+
+library SafeMath {
+
+  function mul(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    if (a == 0) {
+      return 0;
+    }
+    c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    return a / b;
+  }
+
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (time_manipulation)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 4 (reentrancy)?
+- Does it have patterns similar to Example 5 (unchecked_low_level_calls)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

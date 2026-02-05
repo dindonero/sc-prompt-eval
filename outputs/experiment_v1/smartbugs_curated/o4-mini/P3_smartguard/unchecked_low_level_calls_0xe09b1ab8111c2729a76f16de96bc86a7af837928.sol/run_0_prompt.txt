@@ -1,0 +1,1279 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.24;
+
+// File: node_modules/zeppelin-solidity/contracts/token/ERC20/ERC20Basic.sol
+
+/**
+ *
+ *
+ * See https://github.com/ethereum/EIPs/issues/179
+ */
+contract ERC20Basic {
+  function totalSupply() public view returns (uint256);
+  function balanceOf(address who) public view returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+// File: contracts/MyanmarDonations.sol
+
+// ----------------------------------------------------------------------------
+// MyanmarDonations - Donations Contract to help people due to Myanmar flood
+//
+// Copyright (c) 2018 InfoCorp Technologies Pte Ltd.
+// http://www.sentinel-chain.org/
+//
+// The MIT Licence.
+// ----------------------------------------------------------------------------
+
+pragma solidity ^0.4.24;
+
+
+contract MyanmarDonations{
+
+    // SENC Token Address
+    address public SENC_CONTRACT_ADDRESS = 0xA13f0743951B4f6E3e3AA039f682E17279f52bc3;
+    // Donation Wallet Address
+    address public donationWallet;
+    // Foundation Wallet Address
+    address public foundationWallet;
+    // Start time for donation campaign
+    uint256 public startDate;
+    // End time for donation campaign
+    uint256 public endDate;
+    // SENC-ETH pegged rate based on EOD rate of the 8nd August from coingecko in Wei
+    uint256 public sencEthRate;
+
+    // Ether hard cap
+    uint256 public ETHER_HARD_CAP;
+    // InfoCorp committed ETH donation amount
+    uint256 public INFOCORP_DONATION;
+    // Total Ether hard cap to receive
+    uint256 public TOTAL_ETHER_HARD_CAP;
+    // Total of SENC collected at the end of the donation
+    uint256 public totalSencCollected;
+    // Marks the end of the donation.
+    bool public finalized = false;
+
+    uint256 public sencHardCap;
+
+    modifier onlyDonationAddress() {
+        require(msg.sender == donationWallet);
+        _;
+    }
+
+    constructor(                           
+                address _donationWallet, //0xB4ea16258020993520F59cC786c80175C1b807D7
+                address _foundationWallet, //0x2c76E65d3b3E38602CAa2fAB56e0640D0182D8F8
+                uint256 _startDate, //1534125600 [2018-08-13 10:00:00 (GMT +8)]
+                uint256 _endDate, //1534327200 [2018-08-15 18:00:00 (GMT +8)]
+                uint256 _sencEthRate, // 40187198103877
+                uint256 _etherHardCap,
+                uint256 _infocorpDonation
+                ) public {
+        donationWallet = _donationWallet;
+        foundationWallet = _foundationWallet;
+        startDate = _startDate;
+        endDate = _endDate;
+        sencEthRate = _sencEthRate;
+        ETHER_HARD_CAP = _etherHardCap;
+        sencHardCap = ETHER_HARD_CAP * 10 ** 18 / sencEthRate;
+        INFOCORP_DONATION = _infocorpDonation;
+
+        TOTAL_ETHER_HARD_CAP = ETHER_HARD_CAP + INFOCORP_DONATION;
+    }
+
+    ///
+    function() public payable {
+        require(msg.value == TOTAL_ETHER_HARD_CAP);
+        require(
+            address(this).balance <= TOTAL_ETHER_HARD_CAP,
+            "Contract balance hardcap reachead"
+        );
+    }
+
+    /**
+     *
+     * hard cap reached or the campaign reached the final day.
+     */
+    function finalize() public onlyDonationAddress returns (bool) {
+        require(getSencBalance() >= sencHardCap || now >= endDate, "SENC hard cap rached OR End date reached");
+        require(!finalized, "Donation not already finalized");
+        // The Ether balance collected in Wei
+        totalSencCollected = getSencBalance();
+        if (totalSencCollected >= sencHardCap) {
+            // Transfer of donations to the donations address
+            donationWallet.transfer(address(this).balance);
+        } else {
+            uint256 totalDonatedEthers = convertToEther(totalSencCollected) + INFOCORP_DONATION;
+            // Transf
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes. Your write-up correctly pinpoints the broken code, explains exactly how an attacker (or even an innocent misconfiguration) can trigger the failure, and lays out all the preconditions needed for the DoS. Below is a concise, final summary.
+
+1) Vulnerable pattern  
+   • In finalize() the contract does two “push” transfers in sequence:  
+     – `donationWallet.transfer(…)`  
+     – `foundationWallet.transfer(…)`  
+   • Each `transfer` only forwards 2 300 gas and reverts on failure.  
+   • The code never catches or checks the return value—it simply lets any revert bubble up.  
+   • The `finalized` flag is set to true only after both transfers succeed.
+
+2) Attack vector and DoS mechanism  
+   • If either `donationWallet` or `foundationWallet` is a contract whose fallback function  
+     – always reverts, or  
+     – uses more than 2 300 gas and therefore runs out of stipend,  
+   then its `.transfer()` call in finalize() will revert unconditionally.  
+   • That revert rolls back the entire transaction, including the `finalized = true` update.  
+   • As a result, the contract remains un-finalized and still holds all ETH forever.  
+   • Every subsequent call to finalize() hits the same failing transfer, so the funds are locked permanently.
+
+3) Conditions required for exploitation  
+   • You must be able to set one of the recipient addresses to a rejecting contract (e.g. during construction or by governance).  
+   • No other withdrawal or escape hatch exists—only finalize() moves the funds.  
+   • Once your rejecting contract address is in place, no one (including the owner) can finalize or recover the ETH, short of a hard fork or self-destruct.
+
+4) Mitigation recommendations  
+   • Switch to a pull-over-push pattern: credit balances first, let recipients withdraw with a separate call.  
+   • If you must push, use low-level `call{value:…}(“”)` and handle failures gracefully (log a debt or retry later).  
+   • Always update state (e.g. set `finalized = true`) before making external calls, or use the Checks-Effects-Interactions pattern.
+
+By relying on unchecked `transfer` calls (“push”) and only setting the final state afterwards, the contract cedes total control to its recipients’ fallback logic—and a malicious or badly coded fallback can lock the money forever.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 2: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+// Abstract contract for the full ERC 20 Token standard
+// https://github.com/ethereum/EIPs/issues/20
+pragma solidity ^0.4.18;
+
+contract ABC {
+
+    uint256 constant MAX_UINT256 = 2**256 - 1;
+
+    /* Public variables of the token */
+
+    /*
+    NOTE:
+    The following variables are OPTIONAL vanities. One does not have to include them.
+    They allow one to customise the token contract & in no way influences the core functionality.
+    Some wallets/interfaces might not even bother to look at this information.
+    */
+    string public name;                   //fancy name: eg Simon Bucks
+    uint8 public decimals;                //How many decimals to show. ie. There could 1000 base units with 3 decimals. Meaning 0.980 SBX = 980 base units. It's like comparing 1 wei to 1 ether.
+    string public symbol;                 //An identifier: eg SBX
+    string public version = 'ABCv1.0';       //human 0.1 standard. Just an arbitrary versioning scheme.
+    address public owner;
+    uint256 public totalSupply;
+    
+    event Transfer(address indexed _from, address indexed _to, uint256 _value);
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+    event FrozenFunds(address indexed _target, bool _frozen);
+
+     function ABC(
+        uint256 _initialAmount,
+        string _tokenName,
+        uint8 _decimalUnits,
+        string _tokenSymbol
+        ) public {
+        balances[msg.sender] = _initialAmount;               // Give the creator all initial tokens
+        totalSupply = _initialAmount;                        // Update total supply
+        name = _tokenName;                                   // Set the name for display purposes
+        decimals = _decimalUnits;                            // Amount of decimals for display purposes
+        symbol = _tokenSymbol;                               // Set the symbol for display purposes
+        owner = msg.sender;                                  // Set the first owner
+        transfer(msg.sender, _initialAmount);                // Transfer the tokens to the msg.sender
+    }
+
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[msg.sender] != true && frozenAccount[_to] != true);
+        //Default assumes totalSupply can't be over max (2^256 - 1).
+        //If your token leaves out totalSupply and can issue more tokens as time goes on, you need to check if it doesn't wrap.
+        //Replace the if with this one instead.
+        require(balances[msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+        //require(balances[msg.sender] >= _value);
+        balances[msg.sender] -= _value;
+        balances[_to] += _value;
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[_from] != true && frozenAccount[_to] != true);
+
+        //same as above. Replace this line with the following if you want to protect against wrapping uints.
+        require(balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+        uint256 allowance = allowed[_from][msg.sender];
+        // require(balances[_from] >= _value && allowance >= _value);
+        balances[_to] += _value;
+        balances[_from] -= _value;
+        if (allowance < MAX_UINT256) {
+            allowed[_from][msg.sender] -= _value;
+        }
+        emit Transfer(_from, _to, _value);
+        return true;
+    }
+
+    function balanceOf(address _owner) constant public returns (uint256 balance) {
+        return balances[_owner];
+    }
+
+    function approve(address _spender, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[_spender] != true);
+
+        allowed[msg.sender][_spender] = _value;
+```
+
+**Security Analysis:**
+Here is a concise, step-by-step explanation of the “unchecked low-level call” issue in an ERC-20-style contract.
+
+1) The vulnerable pattern  
+   • You use low-level CALL instead of a high-level Solidity function call.  
+   • Example snippet in an `approveAndCall`-type function:  
+     ```
+     // 1) Update contract state
+     allowed[msg.sender][spender] = amount;
+     emit Approval(msg.sender, spender, amount);
+
+     // 2) Perform low-level call without checking return value
+     spender.call(
+       abi.encodeWithSelector(
+         bytes4(keccak256("receiveApproval(address,uint256,uint256,address,bytes)")),
+         msg.sender, amount, this, extraData
+       )
+     );
+     // No require(...) or if(!success) revert() here
+
+     return true;
+     ```
+   • The CALL opcode in the EVM pushes a Boolean success flag on the stack, but Solidity ignores it unless you explicitly capture and test it.
+
+2) Why ignoring the return value is dangerous  
+   • A high-level call (e.g. `otherContract.foo()`) will bubble up a revert.  
+   • A low-level `address.call(...)` never bubbles up a revert; it simply returns `false`.  
+   • If your code doesn’t check that Boolean, execution continues as if the external call succeeded—even though it failed.
+
+3) Attack scenario  
+   • Attacker deploys a malicious `spender` contract whose `receiveApproval(...)` always reverts.  
+   • You call `approveAndCall(attacker, X, data)`.  
+     1. Your contract sets the allowance `allowed[msg.sender][attacker] = X`.  
+     2. It then does `attacker.call(…)`. The malicious contract reverts internally, so CALL returns `false`.  
+     3. Because you never test for `false`, you don’t revert; step (1) stays committed.  
+   • Attacker now has an allowance of X tokens. They immediately call  
+     ```
+     transferFrom(yourAddress, attacker, X)
+     ```  
+     and drain your tokens. Your intended callback never ran, but the state change did.
+
+4) Conditions for exploitation  
+   • You use low-level `.call(...)` (or `.delegatecall`, `.staticcall`) on an untrusted address.  
+   • You fail to capture and check the Boolean return value.  
+   • The callee reverts (intentionally or because of an error), turning the call into a silent failure.
+
+5) How to fix it  
+   • Always capture the return value:  
+     ```
+     (bool success, ) = someAddress.call(...);
+     require(success, "External call failed");
+     ```  
+   • Or use high-level Solidity calls when possible (`IReceiver(someAddress).receiveApproval(...)`), which automatically bubble up reverts.  
+   • Rerun your static analysis to confirm there are no more `unchecked_low_level_calls` warnings.
+
+Summary  
+Any low-level call that doesn’t check its Boolean return lets a callee revert silently, breaking your invariants and allowing an attacker to manipulate state (for example, setting allowances without ever executing the callback). Capturing and handling that return value (or using high-level calls) closes the vulnerability.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 3: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+// Abstract contract for the full ERC 20 Token standard
+// https://github.com/ethereum/EIPs/issues/20
+pragma solidity ^0.4.18;
+
+contract ABC {
+
+    uint256 constant MAX_UINT256 = 2**256 - 1;
+
+    /* Public variables of the token */
+
+    /*
+    NOTE:
+    The following variables are OPTIONAL vanities. One does not have to include them.
+    They allow one to customise the token contract & in no way influences the core functionality.
+    Some wallets/interfaces might not even bother to look at this information.
+    */
+    string public name;                   //fancy name: eg Simon Bucks
+    uint8 public decimals;                //How many decimals to show. ie. There could 1000 base units with 3 decimals. Meaning 0.980 SBX = 980 base units. It's like comparing 1 wei to 1 ether.
+    string public symbol;                 //An identifier: eg SBX
+    string public version = 'ABCv1.0';       //human 0.1 standard. Just an arbitrary versioning scheme.
+    address public owner;
+    uint256 public totalSupply;
+    
+    event Transfer(address indexed _from, address indexed _to, uint256 _value);
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+    event FrozenFunds(address indexed _target, bool _frozen);
+
+     function ABC(
+        uint256 _initialAmount,
+        string _tokenName,
+        uint8 _decimalUnits,
+        string _tokenSymbol
+        ) public {
+        balances[msg.sender] = _initialAmount;               // Give the creator all initial tokens
+        totalSupply = _initialAmount;                        // Update total supply
+        name = _tokenName;                                   // Set the name for display purposes
+        decimals = _decimalUnits;                            // Amount of decimals for display purposes
+        symbol = _tokenSymbol;                               // Set the symbol for display purposes
+        owner = msg.sender;                                  // Set the first owner
+        transfer(msg.sender, _initialAmount);                // Transfer the tokens to the msg.sender
+    }
+
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[msg.sender] != true && frozenAccount[_to] != true);
+        //Default assumes totalSupply can't be over max (2^256 - 1).
+        //If your token leaves out totalSupply and can issue more tokens as time goes on, you need to check if it doesn't wrap.
+        //Replace the if with this one instead.
+        require(balances[msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+        //require(balances[msg.sender] >= _value);
+        balances[msg.sender] -= _value;
+        balances[_to] += _value;
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[_from] != true && frozenAccount[_to] != true);
+
+        //same as above. Replace this line with the following if you want to protect against wrapping uints.
+        require(balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]);
+        uint256 allowance = allowed[_from][msg.sender];
+        // require(balances[_from] >= _value && allowance >= _value);
+        balances[_to] += _value;
+        balances[_from] -= _value;
+        if (allowance < MAX_UINT256) {
+            allowed[_from][msg.sender] -= _value;
+        }
+        emit Transfer(_from, _to, _value);
+        return true;
+    }
+
+    function balanceOf(address _owner) constant public returns (uint256 balance) {
+        return balances[_owner];
+    }
+
+    function approve(address _spender, uint256 _value) public returns (bool success) {
+        //Verifies if the account is frozen
+        require(frozenAccount[_spender] != true);
+
+        allowed[msg.sender][_spender] = _value;
+```
+
+**Security Analysis:**
+This code contains a reentrancy vulnerability.
+
+Refined Explanation of Findings
+
+Overall Verdict  
+VULNERABLE  
+
+Categories of Vulnerability  
+1. ERC-20 “approve/transferFrom” race condition (classic front-running on allowance changes)  
+2. Non-compliant ERC-20 return behavior (missing or incorrect boolean returns, no explicit zero-value handling)  
+
+
+---
+
+1. ERC-20 Interface Non-Compliance  
+– The functions transfer(), transferFrom() and approve() do not consistently return a boolean true on success.  
+  • ERC-20 spec (EIP-20) mandates these functions return “true” to signal success.  
+  • Many integrators (DEX routers, other smart contracts) rely on the return value rather than catching revert. Missing returns can lead to silent failures (the calling contract assumes success when it has in fact failed or done nothing).  
+– Zero-value transfers/approvals are not explicitly allowed or tested.  
+  • The spec calls for zero-value calls to be treated as normal valid operations.  
+  • Without explicit support, callers cannot safely do the standard “approve(spender, 0) then approve(spender, N)” pattern for safely changing allowances.
+
+2. Approve/transferFrom Race Condition  
+– The approve() implementation unconditionally overwrites the existing allowance:  
+     allowance[owner][spender] = newAmount;  
+  with no requirement that newAmount == 0 or that the previous allowance was zero.  
+– Classic front-running attack:  
+   1) Alice currently has allowance A granted to Mallory.  
+   2) Alice wants to change that allowance from A → B by calling approve(Mallory, B).  
+   3) Mallory sees Alice’s transaction in the mempool and front-runs it by calling transferFrom(Alice, Mallory, A), draining the existing allowance.  
+   4) Alice’s approve(tx) then executes, setting the allowance to B.  
+   5) Mallory can now call transferFrom(Alice, Mallory, B), draining the new allowance as well.  
+   6) Net effect: Mallory pulls A + B tokens instead of the intended “at most max(A,B).”  
+– Because there is no check “require(oldAllowance == 0)” or similar, the allowance can effectively be spent twice.
+
+3. Conditions for Exploitation  
+– The attacker must be an approved spender.  
+– The network must allow mempool visibility and front-running (public mempool).  
+– Transactions need enough gas priority so the attacker’s transferFrom can reliably be mined before the owner’s approve.  
+
+4. Impact  
+– Funds can be drained beyond the owner’s intended allowance.  
+– Integrations relying on boolean return values may misinterpret failures or treat no-op calls as successes.  
+
+5. Remediation Recommendations  
+– Conform to ERC-20:  
+   • Always return true on success for transfer, transferFrom, approve.  
+   • Accept and handle zero-value calls per the spec.  
+– Mitigate the race condition:  
+   • Enforce that approve() can only set an allowance when the current allowance is zero (or require that owners first set allowance to zero before setting a new non-zero allowance).  
+   • Better yet, implement increaseAllowance() and decreaseAllowance() helper functions (OpenZeppelin pattern) instead of a raw overwrite.  
+
+Conclusion  
+Because the contract deviates from the ERC-20 specification (missing return values and zero-value handling) and is susceptible to the well-known approve() race condition, it must be treated as vulnerable. All ERC-20 integrators and users should avoid granting allowances to this contract until it is patched.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 4: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/* This program is free software. It comes without any warranty, to
+the extent permitted by applicable law. You can redistribute it
+and/or modify it under the terms of the Do What The Fuck You Want
+To Public License, Version 2, as published by Sam Hocevar. See
+http://www.wtfpl.net/ for more details. */
+
+/* These contracts are examples of contracts with bugs and vulnerabilities in order to practice your hacking skills.
+DO NOT USE THEM OR GET INSPIRATION FROM THEM TO MAKE CODE USED IN PRODUCTION 
+You are required to find vulnerabilities where an attacker harms someone else.
+Being able to destroy your own stuff is not a vulnerability and should be dealt at the interface level.
+*/
+
+pragma solidity ^0.4.10;
+//*** Exercise 1 ***//
+// Simple token you can buy and send.
+contract SimpleToken{
+    mapping(address => uint) public balances;
+    
+    ///
+    function buyToken() payable {
+        balances[msg.sender]+=msg.value / 1 ether;
+    }
+    
+    /**
+     *
+     *
+     */
+    function sendToken(address _recipient, uint _amount) {
+        require(balances[msg.sender]!=0); // You must have some tokens.
+        
+        balances[msg.sender]-=_amount;
+        balances[_recipient]+=_amount;
+    }
+    
+}
+
+//*** Exercise 2 ***//
+// You can buy voting rights by sending ether to the contract.
+// You can vote for the value of your choice.
+contract VoteTwoChoices{
+    mapping(address => uint) public votingRights;
+    mapping(address => uint) public votesCast;
+    mapping(bytes32 => uint) public votesReceived;
+    
+    ///
+    function buyVotingRights() payable {
+        votingRights[msg.sender]+=msg.value/(1 ether);
+    }
+    
+    /**
+     *
+     *
+     */
+    function vote(uint _nbVotes, bytes32 _proposition) {
+        require(_nbVotes + votesCast[msg.sender]<=votingRights[msg.sender]); // Check you have enough voting rights.
+        
+        votesCast[msg.sender]+=_nbVotes;
+        votesReceived[_proposition]+=_nbVotes;
+    }
+
+}
+
+//*** Exercise 3 ***//
+// You can buy tokens.
+// The owner can set the price.
+contract BuyToken {
+    mapping(address => uint) public balances;
+    uint public price=1;
+    address public owner=msg.sender;
+    
+    /**
+     *
+     *
+     */
+    function buyToken(uint _amount, uint _price) payable {
+        require(_price>=price); // The price is at least the current price.
+        require(_price * _amount * 1 ether <= msg.value); // You have paid at least the total price.
+        balances[msg.sender]+=_amount;
+    }
+    
+    /**
+     *
+     */
+    function setPrice(uint _price) {
+        require(msg.sender==owner);
+        
+        price=_price;
+    }
+}
+
+//*** Exercise 4 ***//
+// Contract to store and redeem money.
+contract Store {
+    struct Safe {
+        address owner;
+        uint amount;
+    }
+    
+    Safe[] public safes;
+    
+    ///
+    function store() payable {
+        safes.push(Safe({owner: msg.sender, amount: msg.value}));
+    }
+    
+    ///
+    function take() {
+        for (uint i; i<safes.length; ++i) {
+            Safe safe = safes[i];
+            if (safe.owner==msg.sender && safe.amount!=0) {
+                msg.sender.transfer(safe.amount);
+                safe.amount=0;
+            }
+        }
+        
+    }
+}
+
+//*** Exercise 5 ***//
+// Count the total contribution of each user.
+// Assume that the one creating the contract contributed 1ETH.
+contract CountContribution{
+    mapping(address => uint) public contribution;
+    uint public totalContributions;
+    address ow
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, accurate, and complete rundown of the “unchecked low‐level calls” weakness, how it manifests, and how to defend against it.
+
+1) The vulnerable pattern  
+   • Solidity’s low‐level functions—  
+     – address.send(uint)  
+     – address.call.value(uint)()  
+     – address.delegatecall(bytes)  
+     – address.call(abi-encoded data)  
+     all return **bool** success rather than automatically reverting.  
+   • If you invoke one of these and **never test the returned bool**, you’re implicitly assuming the call succeeded. If it fails, your code continues as if nothing happened.
+
+   Example vulnerable function:
+     function withdraw(uint amount) public {
+       require(balances[msg.sender] >= amount);
+       balances[msg.sender] -= amount;
+       // low‐level send(), return value is ignored
+       msg.sender.send(amount);
+       // execution continues even if send() failed!
+     }
+
+2) Why ignoring the return value is dangerous  
+   • Low‐level calls do **not** revert on failure; they simply return `false`.  
+   • A malicious recipient can sabotage the transfer by:  
+     – Deploying a fallback that uses up all 2,300 gas or explicitly `revert()`s.  
+     – Causing `.send()` or `.call.value()` to fail.  
+   • Your contract never notices the failure, so:  
+     – You’ve already zeroed out or modified state (e.g. `balances[msg.sender] = 0`).  
+     – No Ether left the contract.  
+     – The attacker’s balance is now 0, so they can’t retry.  
+     – Funds are stuck in the contract and your state is inconsistent (DoS / stuck-funds).
+
+3) Conditions required for the exploit  
+   • You perform an external Ether transfer (or call) via a low‐level function.  
+   • You **do not** check the returned boolean.  
+   • A malicious counterparty has a fallback that reverts or consumes all provided gas.  
+   • Your contract proceeds under the false assumption that the external call succeeded.
+
+4) How to fix and best practices  
+   • **Always** check the return value of low‐level calls. For example:
+       (bool success, ) = recipient.call{value: amount}("");
+       require(success, "Transfer failed");
+   • Avoid `address.send` and `address.transfer` in new code—they impose a 2,300-gas stipend that can break if gas costs change.  
+   • Use the Checks-Effects-Interactions pattern:  
+     1) Check all preconditions.  
+     2) Update your contract’s state.  
+     3) **Then** perform the external call, wrapping it in a `require`.  
+   • Consider using established libraries (e.g. OpenZeppelin’s Address.sendValue) that encapsulate correct low‐level call usage.
+
+By adopting these patterns—never ignoring low‐level call return values, using `require` to revert on failure, and following Checks-Effects-Interactions—you eliminate the silent-failure scenario and prevent both Denial-of-Service and stuck-fund exploits.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 5: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+/* This program is free software. It comes without any warranty, to
+the extent permitted by applicable law. You can redistribute it
+and/or modify it under the terms of the Do What The Fuck You Want
+To Public License, Version 2, as published by Sam Hocevar. See
+http://www.wtfpl.net/ for more details. */
+
+/* These contracts are examples of contracts with bugs and vulnerabilities in order to practice your hacking skills.
+DO NOT USE THEM OR GET INSPIRATION FROM THEM TO MAKE CODE USED IN PRODUCTION 
+You are required to find vulnerabilities where an attacker harms someone else.
+Being able to destroy your own stuff is not a vulnerability and should be dealt at the interface level.
+*/
+
+pragma solidity ^0.4.10;
+//*** Exercise 1 ***//
+// Simple token you can buy and send.
+contract SimpleToken{
+    mapping(address => uint) public balances;
+    
+    ///
+    function buyToken() payable {
+        balances[msg.sender]+=msg.value / 1 ether;
+    }
+    
+    /**
+     *
+     *
+     */
+    function sendToken(address _recipient, uint _amount) {
+        require(balances[msg.sender]!=0); // You must have some tokens.
+        
+        balances[msg.sender]-=_amount;
+        balances[_recipient]+=_amount;
+    }
+    
+}
+
+//*** Exercise 2 ***//
+// You can buy voting rights by sending ether to the contract.
+// You can vote for the value of your choice.
+contract VoteTwoChoices{
+    mapping(address => uint) public votingRights;
+    mapping(address => uint) public votesCast;
+    mapping(bytes32 => uint) public votesReceived;
+    
+    ///
+    function buyVotingRights() payable {
+        votingRights[msg.sender]+=msg.value/(1 ether);
+    }
+    
+    /**
+     *
+     *
+     */
+    function vote(uint _nbVotes, bytes32 _proposition) {
+        require(_nbVotes + votesCast[msg.sender]<=votingRights[msg.sender]); // Check you have enough voting rights.
+        
+        votesCast[msg.sender]+=_nbVotes;
+        votesReceived[_proposition]+=_nbVotes;
+    }
+
+}
+
+//*** Exercise 3 ***//
+// You can buy tokens.
+// The owner can set the price.
+contract BuyToken {
+    mapping(address => uint) public balances;
+    uint public price=1;
+    address public owner=msg.sender;
+    
+    /**
+     *
+     *
+     */
+    function buyToken(uint _amount, uint _price) payable {
+        require(_price>=price); // The price is at least the current price.
+        require(_price * _amount * 1 ether <= msg.value); // You have paid at least the total price.
+        balances[msg.sender]+=_amount;
+    }
+    
+    /**
+     *
+     */
+    function setPrice(uint _price) {
+        require(msg.sender==owner);
+        
+        price=_price;
+    }
+}
+
+//*** Exercise 4 ***//
+// Contract to store and redeem money.
+contract Store {
+    struct Safe {
+        address owner;
+        uint amount;
+    }
+    
+    Safe[] public safes;
+    
+    ///
+    function store() payable {
+        safes.push(Safe({owner: msg.sender, amount: msg.value}));
+    }
+    
+    ///
+    function take() {
+        for (uint i; i<safes.length; ++i) {
+            Safe safe = safes[i];
+            if (safe.owner==msg.sender && safe.amount!=0) {
+                msg.sender.transfer(safe.amount);
+                safe.amount=0;
+            }
+        }
+        
+    }
+}
+
+//*** Exercise 5 ***//
+// Count the total contribution of each user.
+// Assume that the one creating the contract contributed 1ETH.
+contract CountContribution{
+    mapping(address => uint) public contribution;
+    uint public totalContributions;
+    address ow
+```
+
+**Security Analysis:**
+Below is a final, consolidated explanation of why all four snippets remain unsafe under any Solidity compiler prior to version 0.8.0. It confirms the original findings, sharpens the description of each flaw, and lists the exact conditions an attacker needs to succeed.
+
+
+GENERAL ROOT CAUSES  
+1. No built-in overflow/underflow checks before v0.8 → arithmetic can wrap  
+2. External calls made before—or instead of—secure state updates  
+3. Return values from low-level calls are ignored  
+4. Dynamically growing arrays create unbounded gas loops  
+
+SNIPPET 1 – SimpleToken (unchecked subtraction)  
+• What’s happening: transfer() does  
+     balances[msg.sender] -= amount;  
+     balances[recipient] += amount;  
+  with no safety check.  
+• Attack vector: If attacker’s balance < amount, subtraction underflows to a huge value (2^256−(amount−balance)), giving them effectively infinite tokens.  
+• Conditions: Any user can call transfer() with amount > their balance. No require() guard means wraparound always happens.
+
+SNIPPET 2 – VoteTwoChoices (unchecked addition)  
+• What’s happening: vote() does  
+     votes[choice] += 1;  
+  without checking that votes[choice] + 1 doesn’t overflow.  
+• Attack vector: By repeatedly voting or manipulating the “choice” mapping, an attacker can wrap the counter from 2^256−1 back to 0, then continue voting forever or bypass a vote cap.  
+• Conditions: No require() or SafeMath. Single‐line increment on a uint256.
+
+SNIPPET 3 – BuyToken (unchecked multiplication)  
+• What’s happening: buy() computes  
+     uint256 tokens = price * msg.value;  
+  with no overflow check, then mints that many tokens.  
+• Attack vector: If price and msg.value are chosen so price * msg.value overflows, tokens becomes a small number. The attacker pays a large ETH amount but receives only a few tokens.  
+• Conditions: Attacker picks values for msg.value (or price if updatable) that trigger wraparound. No SafeMath or built-in checks.
+
+SNIPPET 4 – Vault & Safes (logic/storage misuse, reentrancy, DoS)  
+1. Storage vs. memory mix-up  
+   • Code loads a storage struct into a local memory copy, then calls an external contract to transfer funds.  
+   • Only the memory copy is zeroed afterward—leaving the real balance on‐chain.  
+   → Attacker can drain repeatedly, because the persistent storage never changes.  
+2. Reentrancy + missing return check  
+   • Uses `call` or `send` to do the external transfer before updating the user’s stored balance.  
+   • Doesn’t verify the boolean return value of `call`/`send`.  
+   → A malicious fallback can reenter back into the withdraw function and withdraw again.  
+3. Unbounded loops → Denial-of-Service  
+   • A function iterates through an ever-growing `safes[]` array in a single transaction.  
+   • An attacker can bloat `safes[]` until the loop runs out of gas and reverts, blocking all calls to that function.  
+
+CONDITIONS FOR EXPLOIT  
+• Compiler < 0.8.0 (no automatic overflow/underflow checks)  
+• No use of SafeMath or custom require/assert guards  
+• External calls invoked before state updates—or with ignored return values  
+• Dynamically expanding arrays used in loops
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.24;
+
+/* This is fiftyflip 
+a simple yet elegant game contract 
+that is connected to Proof of Community 
+contract(0x1739e311ddBf1efdFbc39b74526Fd8b600755ADa).
+
+Greed serves no-one but the one, 
+But charity is kind, suffereth not and envieth not. 
+Charity is to give of oneself in the service of his fellow beings. 
+
+Play on Players. and Remember fifty feeds the multiudes and gives to the PoC community
+Forever and ever. 
+
+*/
+
+contract FiftyFlip {
+    uint constant DONATING_X = 20; // 2% kujira
+
+    // Need to be discussed
+    uint constant JACKPOT_FEE = 10; // 1% jackpot
+    uint constant JACKPOT_MODULO = 1000; // 0.1% jackpotwin
+    uint constant DEV_FEE = 20; // 2% devfee
+    uint constant WIN_X = 1900; // 1.9x
+
+    // There is minimum and maximum bets.
+    uint constant MIN_BET = 0.01 ether;
+    uint constant MAX_BET = 1 ether;
+
+    uint constant BET_EXPIRATION_BLOCKS = 250;
+
+    // owner and PoC contract address
+    address public owner;
+    address public autoPlayBot;
+    address public secretSigner;
+    address private whale;
+
+    // Accumulated jackpot fund.
+    uint256 public jackpotSize;
+    uint256 public devFeeSize;
+
+    // Funds that are locked in potentially winning bets.
+    uint256 public lockedInBets;
+    uint256 public totalAmountToWhale;
+
+    struct Bet {
+        // Wager amount in wei.
+        uint amount;
+        // Block number of placeBet tx.
+        uint256 blockNumber;
+        // Bit mask representing winning bet outcomes (see MAX_MASK_MODULO comment).
+        bool betMask;
+        // Address of a player, used to pay out winning bets.
+        address player;
+    }
+
+    mapping (uint => Bet) bets;
+    mapping (address => uint) donateAmount;
+
+    // events
+    event Wager(uint ticketID, uint betAmount, uint256 betBlockNumber, bool betMask, address betPlayer);
+    event Win(address winner, uint amount, uint ticketID, bool maskRes, uint jackpotRes);
+    event Lose(address loser, uint amount, uint ticketID, bool maskRes, uint jackpotRes);
+    event Refund(uint ticketID, uint256 amount, address requester);
+    event Donate(uint256 amount, address donator);
+    event FailedPayment(address paidUser, uint amount);
+    event Payment(address noPaidUser, uint amount);
+    event JackpotPayment(address player, uint ticketID, uint jackpotWin);
+
+    // constructor
+    constructor (address whaleAddress, address autoPlayBotAddress, address secretSignerAddress) public {
+        owner = msg.sender;
+        autoPlayBot = autoPlayBotAddress;
+        whale = whaleAddress;
+        secretSigner = secretSignerAddress;
+        jackpotSize = 0;
+        devFeeSize = 0;
+        lockedInBets = 0;
+        totalAmountToWhale = 0;
+    }
+
+    // modifiers
+    modifier onlyOwner() {
+        require (msg.sender == owner, "You are not the owner of this contract!");
+        _;
+    }    
+
+    modifier onlyBot() {
+        require (msg.sender == autoPlayBot, "You are not the bot of this contract!");
+        _;
+    }
+    
+    modifier checkContractHealth() {
+        require (address(this).balance >= lockedInBets + jackpotSize + devFeeSize, "This contract doesn't have enough balance, it is stopped till someone donate to this game!");
+        _;
+    }
+
+    // betMast:
+    // false is front, true is back
+
+    function() public payable { }
+
+    function setBotAddress(address autoPlayBotAddress)
+    onlyOwner() 
+    external 
+    {
+        autoPlayBot = autoPlayBotAddress;
+    }
+
+    function setSecretSigner(address _secretSigner)
+    onlyOwner()  
+    external
+    {
+        secretSigner = _secretSigner;
+    }
+
+    // wager function
+    function wager(bool bMask, uint ticketID, uint ticketLastBlock, uint8 v, bytes32 r, bytes32 s)  
+    checkContractHealth()
+    external
+    payable { 
+        Bet storage bet = bets[ticketID];
+        uint amount = msg.value;
+        address player = msg.sender;
+        require (bet.player == address(0), "Ticket is not new one!");
+        require (amount >= MIN_BET, "Your bet is lower than minimum bet amount");
+        require (amount <= MAX_BET, "Your bet is higher than maximum bet amount");
+        require (getCollateralBalance() >= 2 * amount, "If we accept this, this contract will be in danger!");
+
+        require (block.number <= ticketLastBlock, "Ticket has expired.");
+        bytes32 signatureHash = keccak256(abi.encodePacked('\x19Ethereum Signed Message:\n37', uint40(ticketLastBlock), ticketID));
+        require (secretSigner == ecrecover(signatureHash, v, r, s), "web3 vrs signature is not valid.");
+
+        jackpotSize += amount * JACKPOT_FEE / 1000;
+        devFeeSize += amount * DEV_FEE / 1000;
+        lockedInBets += amount * WIN_X / 1000;
+
+        uint donate_amount = amount * DONATING_X / 1000;
+        
+        whale.call.value(donate_amount)(bytes4(keccak256("donate()")));
+        totalAmountToWhale += donate_amount;
+
+        bet.amount = amount;
+        bet.blockNumber = block.number;
+        bet.betMask = bMask;
+        bet.player = player;
+
+        emit Wager(ticketID, bet.amount, bet.blockNumber, bet.betMask, bet.player);
+    }
+
+    // method to determine winners and losers
+    function play(uint ticketReveal)
+    checkContractHealth()
+    external
+    {
+        uint ticketID = uint(keccak256(abi.encodePacked(ticketReveal)));
+        Bet storage bet = bets[ticketID];
+        require (bet.player != address(0), "TicketID is not correct!");
+        require (bet.amount != 0, "Ticket is already used one!");
+        uint256 blockNumber = bet.blockNumber;
+        if(blockNumber < block.number && blockNumber >= block.number - BET_EXPIRATION_BLOCKS)
+        {
+            uint256 random = uint256(keccak256(abi.encodePacked(blockhash(blockNumber),  ticketReveal)));
+            bool maskRes = (random % 2) !=0;
+            uint jackpotRes = random % JACKPOT_MODULO;
+    
+            uint tossWinAmount = bet.amount * WIN_X / 1000;
+
+            uint tossWin = 0;
+            uint jackpotWin = 0;
+            
+            if(bet.betMask == maskRes) {
+                tossWin = tossWinAmount;
+            }
+            if(jackpotRes == 0) {
+                jackpotWin = jackpotSize;
+                jackpotSize = 0;
+            }
+            if (jackpotWin > 0) {
+                emit JackpotPayment(bet.player, ticketID, jackpotWin);
+            }
+            if(tossWin + jackpotWin > 0)
+            {
+                payout(bet.player, tossWin + jackpotWin, ticketID, maskRes, jackpotRes);
+            }
+            else 
+            {
+                loseWager(bet.player, bet.amount, ticketID, maskRes, jackpotRes);
+            }
+            lockedInBets -= tossWinAmount;
+            bet.amount = 0;
+        }
+        else
+        {
+            revert();
+        }
+    }
+
+    function donateForContractHealth()
+    external 
+    payable
+    {
+        donateAmount[msg.sender] += msg.value;
+        emit Donate(msg.value, msg.sender);
+    }
+
+    function withdrawDonation(uint amount)
+    external 
+    {
+        require(donateAmount[msg.sender] >= amount, "You are going to withdraw more than you donated!");
+        
+        if (sendFunds(msg.sender, amount)){
+            donateAmount[msg.sender] -= amount;
+        }
+    }
+
+    // method to refund
+    function refund(uint ticketID)
+    checkContractHealth()
+    external {
+        Bet storage bet = bets[ticketID];
+        
+        require (bet.amount != 0, "this ticket has no balance");
+        require (block.number > bet.blockNumber + BET_EXPIRATION_BLOCKS, "this ticket is expired.");
+        sendRefund(ticketID);
+    }
+
+    // Funds withdrawl
+    function withdrawDevFee(address withdrawAddress, uint withdrawAmount)
+    onlyOwner()
+    checkContractHealth() 
+    external {
+        require (devFeeSize >= withdrawAmount, "You are trying to withdraw more amount than developer fee.");
+        require (withdrawAmount <= address(this).balance, "Contract balance is lower than withdrawAmount");
+        require (devFeeSize <= address(this).balance, "Not enough funds to withdraw.");
+        if (sendFunds(withdrawAddress, withdrawAmount)){
+            devFeeSize -= withdrawAmount;
+        }
+    }
+
+    // Funds withdrawl
+    function withdrawBotFee(uint withdrawAmount)
+    onlyBot()
+    checkContractHealth() 
+    external {
+        require (devFeeSize >= withdrawAmount, "You are trying to withdraw more amount than developer fee.");
+        require (withdrawAmount <= address(this).balance, "Contract balance is lower than withdrawAmount");
+        require (devFeeSize <= address(this).balance, "Not enough funds to withdraw.");
+        if (sendFunds(autoPlayBot, withdrawAmount)){
+            devFeeSize -= withdrawAmount;
+        }
+    }
+
+    // Get Bet Info from id
+    function getBetInfo(uint ticketID) 
+    constant
+    external 
+    returns (uint, uint256, bool, address){
+        Bet storage bet = bets[ticketID];
+        return (bet.amount, bet.blockNumber, bet.betMask, bet.player);
+    }
+
+    // Get Bet Info from id
+    function getContractBalance() 
+    constant
+    external 
+    returns (uint){
+        return address(this).balance;
+    }
+
+    // Get Collateral for Bet
+    function getCollateralBalance() 
+    constant
+    public 
+    returns (uint){
+        if (address(this).balance > lockedInBets + jackpotSize + devFeeSize)
+            return address(this).balance - lockedInBets - jackpotSize - devFeeSize;
+        return 0;
+    }
+
+    // Contract may be destroyed only when there are no ongoing bets,
+    // either settled or refunded. All funds are transferred to contract owner.
+    function kill() external onlyOwner() {
+        require (lockedInBets == 0, "All bets should be processed (settled or refunded) before self-destruct.");
+        selfdestruct(owner);
+    }
+
+    // Payout ETH to winner
+    function payout(address winner, uint ethToTransfer, uint ticketID, bool maskRes, uint jackpotRes) 
+    internal 
+    {        
+        winner.transfer(ethToTransfer);
+        emit Win(winner, ethToTransfer, ticketID, maskRes, jackpotRes);
+    }
+
+    // sendRefund to requester
+    function sendRefund(uint ticketID) 
+    internal 
+    {
+        Bet storage bet = bets[ticketID];
+        address requester = bet.player;
+        uint256 ethToTransfer = bet.amount;        
+        requester.transfer(ethToTransfer);
+
+        uint tossWinAmount = bet.amount * WIN_X / 1000;
+        lockedInBets -= tossWinAmount;
+
+        bet.amount = 0;
+        emit Refund(ticketID, ethToTransfer, requester);
+    }
+
+    // Helper routine to process the payment.
+    function sendFunds(address paidUser, uint amount) private returns (bool){
+        bool success = paidUser.send(amount);
+        if (success) {
+            emit Payment(paidUser, amount);
+        } else {
+            emit FailedPayment(paidUser, amount);
+        }
+        return success;
+    }
+    // Payout ETH to whale when player loses
+    function loseWager(address player, uint amount, uint ticketID, bool maskRes, uint jackpotRes) 
+    internal 
+    {
+        emit Lose(player, amount, ticketID, maskRes, jackpotRes);
+    }
+
+    // bulk clean the storage.
+    function clearStorage(uint[] toCleanTicketIDs) external {
+        uint length = toCleanTicketIDs.length;
+
+        for (uint i = 0; i < length; i++) {
+            clearProcessedBet(toCleanTicketIDs[i]);
+        }
+    }
+
+    // Helper routine to move 'processed' bets into 'clean' state.
+    function clearProcessedBet(uint ticketID) private {
+        Bet storage bet = bets[ticketID];
+
+        // Do not overwrite active bets with zeros; additionally prevent cleanup of bets
+        // for which ticketID signatures may have not expired yet (see whitepaper for details).
+        if (bet.amount != 0 || block.number <= bet.blockNumber + BET_EXPIRATION_BLOCKS) {
+            return;
+        }
+
+        bet.blockNumber = 0;
+        bet.betMask = false;
+        bet.player = address(0);
+    }
+
+    // A trap door for when someone sends tokens other than the intended ones so the overseers can decide where to send them.
+    function transferAnyERC20Token(address tokenAddress, address tokenOwner, uint tokens) 
+    public 
+    onlyOwner() 
+    returns (bool success) 
+    {
+        return ERC20Interface(tokenAddress).transfer(tokenOwner, tokens);
+    }
+}
+
+//Define ERC20Interface.transfer, so PoCWHALE can transfer tokens accidently sent to it.
+contract ERC20Interface 
+{
+    function transfer(address to, uint256 tokens) public returns (bool success);
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (denial_of_service)?
+- Does it have patterns similar to Example 2 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 3 (reentrancy)?
+- Does it have patterns similar to Example 4 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 5 (reentrancy)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

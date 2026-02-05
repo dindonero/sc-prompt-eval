@@ -1,0 +1,737 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+contract guess_wis
+{
+    function Try(string _response)
+    external
+    payable
+    {
+        require(msg.sender == tx.origin);
+        
+        if(responseHash == keccak256(_response) && msg.value>1 ether)
+        {
+            msg.sender.transfer(this.balance);
+        }
+    }
+    
+    string public question;
+ 
+    address questionSender;
+  
+    bytes32 responseHash;
+ 
+    function StartGuess_wis(string _question,string _response)
+    public
+    payable
+    {
+        if(responseHash==0x0)
+        {
+            responseHash = keccak256(_response);
+            
+            question = _question;
+            
+            questionSender = msg.sender;
+        }
+    }
+    
+    function StopGame()
+    public
+    payable
+    {
+       require(msg.sender==questionSender);
+       
+       msg.sender.transfer(this.balance);
+    }
+    
+    function NewQuestion(string _question, bytes32 _responseHash)
+    public
+    payable
+    {
+        require(msg.sender==questionSender);
+        
+        question = _question;
+        
+        responseHash = _responseHash;
+    }
+    
+    function() public payable{}
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Below is a final, concise explanation of exactly why and how this contract can be DoS-locked by a malicious question-setter.
+
+1) Vulnerable code in NewQuestion  
+   • Snippet:
+     ```
+     function NewQuestion(string _question, bytes32 _responseHash)
+       public
+       payable
+     {
+       require(msg.sender == questionSender);
+       question      = _question;
+       responseHash  = _responseHash;
+     }
+     ```  
+   • What’s wrong?  
+     – The contract gives the questionSender total freedom to overwrite the secret hash with *any* 32-byte value, even one for which no one knows a valid pre-image.  
+     – There is no on-chain check that `_responseHash` was actually derived from a clue or string the setter ever intends to reveal.
+
+2) How the setter exploits this to freeze the game  
+   1. As questionSender, call for example:  
+      ```
+      NewQuestion("What is 2+2?", 0xdeadbeef…cafebabe);
+      ```  
+      Here `0xdeadbeef…cafebabe` is just random data.  
+   2. Players keep guessing (and paying >1 ETH per guess), but in the Try() function the test  
+      ```
+      if (responseHash == keccak256(_guess) && msg.value > 1 ether) { …win… }
+      ```  
+      will *always* fail, because keccak256 of any human‐readable guess will never equal the random constant.  
+   3. The balance accumulates with each failed guess, and no one can ever satisfy the success branch to claim the pot.
+
+3) Why there is no rescue  
+   • Only the questionSender can call StopGame() to withdraw funds or reset the game.  
+   • There is no timeout, no player-driven emergency escape, no multi-sig or DAO check.  
+   • Because keccak256 is pre-image resistant, no amount of off-chain compute will reveal a string matching that random 32-byte hash.
+
+4) Preconditions that make this DoS possible  
+   a) Arbitrary hash injection in NewQuestion  
+   b) Lack of any on-chain commitment scheme or require-reveal pattern  
+   c) Absence of time-lock, refunds, or third-party stop mechanisms  
+   d) Immutable pre-image resistance of keccak256
+
+In short, the setter can swap in a completely unknown hash at will, locking out every player forever. Players keep paying to guess, never win, and only the setter controls when (or if) the game ever ends.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 2: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+contract qui_qz
+{
+    function Try(string _response)
+    external
+    payable
+    {
+        require(msg.sender == tx.origin);
+        
+        if(responseHash == keccak256(_response) && msg.value>1 ether)
+        {
+            msg.sender.transfer(this.balance);
+        }
+    }
+    
+    string public question;
+ 
+    address questionSender;
+  
+    bytes32 responseHash;
+ 
+    function Start_qui_qz(string _question,string _response)
+    public
+    payable
+    {
+        if(responseHash==0x0)
+        {
+            responseHash = keccak256(_response);
+            
+            question = _question;
+            
+            questionSender = msg.sender;
+        }
+    }
+    
+    function StopGame()
+    public
+    payable
+    {
+       require(msg.sender==questionSender);
+       
+       msg.sender.transfer(this.balance);
+    }
+    
+    function NewQuestion(string _question, bytes32 _responseHash)
+    public
+    payable
+    {
+        require(msg.sender==questionSender);
+        
+        question = _question;
+        
+        responseHash = _responseHash;
+    }
+    
+    function() public payable{}
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Yes—your write-up correctly pinpoints the problem, clearly walks through how an attacker can lock up the pool, and lists exactly why nothing in the contract lets anyone else recover their funds. Here is a tightened, final explanation:
+
+1. Vulnerable Code Patterns  
+   • In Start_qui_qz, the very first caller becomes questionSender and sets responseHash = keccak256(_response).  
+   • Only questionSender may ever update responseHash (via NewQuestion) or pull out all funds (via StopGame).  
+   • There is no timeout or escrow, nor any check that the new responseHash actually has a preimage anyone could discover.  
+   • The Try function only succeeds if a caller supplies a string whose keccak256 matches responseHash—and it requires >1 ETH to play.
+
+2. Attack Vector (DoS Trap)  
+   1. Attacker calls Start_qui_qz, staking e.g. 2 ETH with a known answer so the game appears live.  
+   2. Honest players can join, pay >1 ETH, and would normally submit the correct answer to win the pot.  
+   3. Instead of letting the quiz conclude, the attacker (as questionSender) calls NewQuestion(randomBytes32) with a 32-byte value for which no one knows a preimage.  
+   4. From then on, Try will always revert—no string hashes to that randomBytes32.  
+   5. Honest players may keep staking 1 ETH trying, but they can’t win and their stakes accumulate in the contract.  
+   6. Only questionSender can ever call StopGame to withdraw, and they simply refuse—locking all ETH indefinitely.
+
+3. Preconditions Enabling the Exploit  
+   • The setter has unilateral control to replace responseHash with an arbitrary value, with no requirement that it be “solvable.”  
+   • There is no expiration, challenge‐reset, or fallback mechanism.  
+   • Only the setter can stop the game and withdraw—everyone else is forever barred once the hash is unsolvable.  
+   • Try cannot succeed once responseHash is set to a random bytes32, so no user can ever recover funds.
+
+Result: The attacker has mounted a classic Denial-of-Service on the entire quiz—freezing both the original pot and all future stakes with no on-chain way to unlock them.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 3: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.20;
+
+contract guess_tw
+{
+    function Try(string _response)
+    external
+    payable
+    {
+        require(msg.sender == tx.origin);
+        
+        if(responseHash == keccak256(_response) && msg.value>1 ether)
+        {
+            msg.sender.transfer(this.balance);
+        }
+    }
+    
+    string public question;
+ 
+    address questionSender;
+  
+    bytes32 responseHash;
+ 
+    function StartGuess_tw(string _question,string _response)
+    public
+    payable
+    {
+        if(responseHash==0x0)
+        {
+            responseHash = keccak256(_response);
+            
+            question = _question;
+            
+            questionSender = msg.sender;
+        }
+    }
+    
+    function StopGame()
+    public
+    payable
+    {
+       require(msg.sender==questionSender);
+       
+       msg.sender.transfer(this.balance);
+    }
+    
+    function NewQuestion(string _question, bytes32 _responseHash)
+    public
+    payable
+    {
+        require(msg.sender==questionSender);
+        
+        question = _question;
+        
+        responseHash = _responseHash;
+    }
+    
+    function() public payable{}
+}
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Here’s a concise, final take on the bug, why it’s exploitable, and how to fix it:
+
+1) What’s wrong in the code  
+ • Both payout functions – Try() (for a correct guess) and StopGame() (for the question owner) – do this:  
+     msg.sender.transfer(this.balance);  
+ • You never check or handle failure of that transfer; a throw in the fallback of the recipient will bubble up and revert the entire call.  
+ • Ownership (questionSender/questionOwner) is assigned to any caller at StartGuess_tw, so you can end up with a malicious contract in that role.
+
+2) How an attacker locks the funds  
+ 1. Attacker deploys a helper contract whose fallback always reverts.  
+ 2. From their malicious contract they call StartGuess_tw(…), becoming the questionSender.  
+ 3. They send Ether into your contract (either by a normal deposit or even forced via self-destruct).  
+ 4. They then call StopGame(). Inside StopGame you do msg.sender.transfer(balance): since msg.sender is the attacker’s contract, its fallback reverts, causing transfer() to throw.  
+ 5. Because you never catch or handle that throw, StopGame() reverts and no state changes or transfers occur. The contract still holds all the Ether.  
+ 6. Now no one else can call StopGame (it’s restricted to questionSender), and no one can ever succeed at Try() because it uses the same pattern. The funds are locked forever.
+
+3) Why this happens  
+ • Solidity’s transfer() forwards only 2,300 gas and automatically reverts if the fallback uses more or explicitly reverts.  
+ • You rely exclusively on transfer() for critical payouts and don’t provide any pull-over-push or refund-queue fallback.  
+ • You allow anyone (including malicious contracts) to become the recipient via StartGuess_tw.
+
+4) How to fix it  
+ • Switch to a pull-over-push pattern: record owed balances in a mapping and let recipients call a withdraw() function that does a guarded transfer.  
+ • If you must push funds, use .send() or .call.value(…)(…) and check the returned boolean instead of letting it throw unconditionally.  
+ • Introduce an escape hatch or admin-recovery path so that if an owner/recipient contract becomes unreachable, you can reassign or reclaim the funds.
+
+This explanation precisely identifies the vulnerable lines, walks through the exploit step by step, and lays out the essential conditions that make it possible. It also gives you concrete, battle-tested patterns to prevent the issue.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+### EXAMPLE 4: BAD_RANDOMNESS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.17;
+
+contract SingleSourceAuthority {
+     
+    struct Authority {
+        bool valid;
+        address authorizedBy;
+        address revokedBy;
+        uint validFrom;
+        uint validTo;
+    }
+
+     
+    address public rootAuthority;
+    mapping(address => Authority) public authorities;
+
+     
+    modifier restricted() {
+        if (msg.sender == rootAuthority)
+            _;
+    }
+
+     
+    function SingleSourceAuthority() public {
+        rootAuthority = msg.sender;
+    }
+
+     
+    function changeRootAuthority(address newRootAuthorityAddress)
+      public
+      restricted()
+    {
+        rootAuthority = newRootAuthorityAddress;
+    }
+
+    function isRootAuthority(address authorityAddress)
+      public
+      view
+      returns (bool)
+    {
+        if (authorityAddress == rootAuthority) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    function isValidAuthority(address authorityAddress, uint blockNumber)
+      public
+      view
+      returns (bool)
+    {
+        Authority storage authority = authorities[authorityAddress];
+        if (authority.valid) {
+            if (authority.validFrom <= blockNumber && (authority.validTo == 0 || authority.validTo >= blockNumber)) {
+                return true;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    function approveAuthority(address authorityAddress) public restricted() {
+        Authority memory authority = Authority({
+            valid: true,
+            authorizedBy: msg.sender,
+            revokedBy: 0x0,
+            validFrom: block.number,
+            validTo: 0
+        });
+        authorities[authorityAddress] = authority;
+    }
+
+    function revokeAuthority(address authorityAddress, uint blockNumber) public restricted() {
+        Authority storage authority = authorities[authorityAddress];
+        authority.revokedBy = msg.sender;
+        authority.validTo = blockNumber;
+    }
+}
+```
+
+**Security Analysis:**
+This code contains a bad_randomness vulnerability.
+
+Yes—your write-up correctly pinpoints the flawed code, clearly lays out how an attacker can game it, and lists the exact conditions that make the exploit possible. Here’s a final, tightened explanation:
+
+1. What’s wrong (code anti-pattern)  
+   • In approveAuthority, the contract does  
+     validFrom = block.number  
+     as if the upcoming block height were some “secret” pivot. In reality everyone sees the current and next block number.  
+   • In revokeAuthority, the caller supplies an arbitrary blockNumber for validTo. Again, you’re trusting users and miners to pick numbers fairly, which they won’t when there’s profit in cheating.
+
+2. How an attacker abuses it  
+   • Gaining early access: Alice watches the chain, spots the current block, and submits approveAuthority timed exactly for block N (or N+1). She isn’t guessing—she deliberately chooses N. If she’s colluding with a miner, they can hold her tx off-chain or re-include it to guarantee it lands at her chosen block.  
+   • Premature revocation: A malicious revoker calls revokeAuthority(victim, M) with M set way in the future (or even equal to the current block). There’s no unpredictable delay—M is under the attacker’s control and immediately enforceable once a miner includes that tx.
+
+3. Why it works (conditions for exploit)  
+   • block.number is public, monotonic, and perfectly predictable. There’s zero entropy.  
+   • Miners decide when to include transactions and can delay or re-order them to hit an exact block number.  
+   • Front-running is trivial: anyone sees pending txs in the mempool and can outbid them to land in the same or next block.
+
+4. The fix  
+   Never treat block.number (or block.timestamp or blockhash) as a source of randomness. If you need unpredictability:  
+   • Integrate a verifiable randomness oracle (e.g. Chainlink VRF)  
+   • Or adopt a commit–reveal scheme so participants lock in values before revealing them later, removing timing bias
+
+By swapping out block-height “entropy” for a cryptographically secure randomness source (or a proper commit–reveal flow), you eliminate the predictability that attackers and colluding miners rely on.
+
+
+**Classification**: This code contains a **bad_randomness** vulnerability.
+
+---
+
+### EXAMPLE 5: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.19;
+
+contract COIN_BOX   
+{
+    struct Holder   
+    {
+        uint unlockTime;
+        uint balance;
+    }
+    
+    mapping (address => Holder) public Acc;
+    
+    uint public MinSum;
+    
+    Log LogFile;
+    
+    bool intitalized;
+    
+    function SetMinSum(uint _val)
+    public
+    {
+        if(intitalized)throw;
+        MinSum = _val;
+    }
+    
+    function SetLogFile(address _log)
+    public
+    {
+        if(intitalized)throw;
+        LogFile = Log(_log);
+    }
+    
+    function Initialized()
+    public
+    {
+        intitalized = true;
+    }
+    
+    function Put(uint _lockTime)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        acc.balance += msg.value;
+        if(now+_lockTime>acc.unlockTime)acc.unlockTime=now+_lockTime;
+        LogFile.AddMessage(msg.sender,msg.value,"Put");
+    }
+    
+    function Collect(uint _am)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        if( acc.balance>=MinSum && acc.balance>=_am && now>acc.unlockTime)
+        {
+            if(msg.sender.call.value(_am)())
+            {
+                acc.balance-=_am;
+                LogFile.AddMessage(msg.sender,_am,"Collect");
+            }
+        }
+    }
+    
+    function() 
+    public 
+    payable
+    {
+        Put(0);
+    }
+    
+}
+
+
+contract Log 
+{
+    struct Message
+    {
+        address Sender;
+        string  Data;
+        uint Val;
+        uint  Time;
+    }
+    
+    Message[] public History;
+    
+    Message LastMsg;
+    
+    function AddMessage(address _adr,uint _val,string _data)
+    public
+    {
+        LastMsg.Sender = _adr;
+        LastMsg.Time = now;
+        LastMsg.Val = _val;
+        LastMsg.Data = _data;
+        History.push(LastMsg);
+    }
+}
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Yes – your write-up correctly pinpoints the bug, clearly shows how an attacker re-enters via the unchecked low-level call, and spells out exactly when and why it works. Here is a final, boiled-down explanation:
+
+1) Vulnerable pattern  
+   In your `Collect` function you do:  
+     if (msg.sender.call.value(_am)()) {  
+       acc.balance -= _am;  
+       …  
+     }  
+   • You use the raw `.call.value(...)()` which forwards all leftover gas to the callee.  
+   • You update your internal bookkeeping only *after* the external call returns.  
+
+2) Why this is dangerous  
+   • Forwarding all gas lets the recipient’s fallback invoke arbitrary code (including re-entering your contract).  
+   • By contrast, `address.transfer(...)` or `address.send(...)` only forward 2,300 gas, which prevents most state-changing re-entry.  
+
+3) The storage vs. memory bug  
+   You wrote:  
+     var acc = Acc[msg.sender];  
+   In Solidity 0.4.x that makes `acc` a memory copy of the struct. You then:  
+   1. Pull the struct into memory.  
+   2. Call back to the attacker.  
+   3. Subtract `_am` from `acc.balance` in memory.  
+   4. Never write it back to `Acc[msg.sender]` in storage.  
+   The on-chain balance never changes.  
+
+4) Exploit flow  
+   Attacker’s contract:  
+     function go() public payable {  
+       box.Put.value(msg.value)();        // fund the box  
+       box.Collect(msg.value);            // start withdrawal  
+     }  
+     function () public payable {        // fallback  
+       if (address(box).ba
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ * @source: etherscan.io 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.25;
+
+contract WALLET
+{
+    function Put(uint _unlockTime)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        acc.balance += msg.value;
+        acc.unlockTime = _unlockTime>now?_unlockTime:now;
+        LogFile.AddMessage(msg.sender,msg.value,"Put");
+    }
+
+    function Collect(uint _am)
+    public
+    payable
+    {
+        var acc = Acc[msg.sender];
+        if( acc.balance>=MinSum && acc.balance>=_am && now>acc.unlockTime)
+        {
+            
+            if(msg.sender.call.value(_am)())
+            {
+                acc.balance-=_am;
+                LogFile.AddMessage(msg.sender,_am,"Collect");
+            }
+        }
+    }
+
+    function() 
+    public 
+    payable
+    {
+        Put(0);
+    }
+
+    struct Holder   
+    {
+        uint unlockTime;
+        uint balance;
+    }
+
+    mapping (address => Holder) public Acc;
+
+    Log LogFile;
+
+    uint public MinSum = 1 ether;    
+
+    function WALLET(address log) public{
+        LogFile = Log(log);
+    }
+}
+
+contract Log 
+{
+    struct Message
+    {
+        address Sender;
+        string  Data;
+        uint Val;
+        uint  Time;
+    }
+
+    Message[] public History;
+
+    Message LastMsg;
+
+    function AddMessage(address _adr,uint _val,string _data)
+    public
+    {
+        LastMsg.Sender = _adr;
+        LastMsg.Time = now;
+        LastMsg.Val = _val;
+        LastMsg.Data = _data;
+        History.push(LastMsg);
+    }
+}
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (denial_of_service)?
+- Does it have patterns similar to Example 2 (denial_of_service)?
+- Does it have patterns similar to Example 3 (denial_of_service)?
+- Does it have patterns similar to Example 4 (bad_randomness)?
+- Does it have patterns similar to Example 5 (unchecked_low_level_calls)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

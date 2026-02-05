@@ -1,0 +1,1257 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.15;
+
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+
+  using SafeMath for uint256;
+
+  modifier onlyPayloadSize(uint size) {
+    assert(msg.data.length == size + 4);
+    _;
+  }
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) onlyPayloadSize(2 * 32) returns (bool) {
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+}
+
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_to] = balances[_to].add(_value);
+    balances[_from] = balances[_from].sub(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+ 
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s a concise, final take on why this token was mis-flagged for “unchecked low-level calls” and where the only real risk lies:
+
+1) What “unchecked low-level calls” actually means  
+   – Any use of Solidity’s primitives like  
+     • `.call(...)`  
+     • `.callcode(...)`  
+     • `.delegatecall(...)`  
+     • `.send(...)`  
+   – If you invoke one of these and do *not* check its `bool` return, you silently ignore failures. An attacker can force the call to fail and your contract will carry on as if nothing went wrong, corrupting state.
+
+2) Why this ERC-20 implementation is *not* vulnerable to that  
+   – Nowhere in `BasicToken`, `StandardToken` or any of their inherited interfaces do you see `.call`, `.send`, `.delegatecall`, or `.callcode`.  
+   – All balance transfers are just `balances[from] = balances[from] - value; balances[to] += value;` on a `mapping(address ⇒ uint256)`.  
+   – The only “external” actions are `emit Transfer(...)` or `emit Approval(...)`—these are *events*, not contract calls, and cannot revert or fail in the low-level sense.
+
+3) The one thing to watch for: the short-address attack  
+   – This attack tricks your function into reading fewer than 32 bytes for an address parameter. Solidity will pad the missing bytes on the *right*, shifting all subsequent arguments and giving you garbage values.  
+   – The code’s `onlyPayloadSize(uint size)` modifier:  
+        modifier onlyPayloadSize(uint size) {  
+          assert(msg.data.length == size + 4);  
+          _;  
+        }  
+     was explicitly introduced to prevent that. It checks that the calldata length is exactly what you expect (4 bytes of selector + N×32 bytes of parameters). If it isn’t, it `assert`s (reverts), so the truncated-data call never reaches your logic.
+
+Conclusion  
+– There are zero low-level calls here, so nothing to “unchecked-call” on.  
+– The misclassification stems from confusing event emissions or mapping updates with low-level `.call` primitives.  
+– The only historical quirk in code like this is the short-address attack, and *that* is already addressed by `onlyPayloadSize`.
+
+Final answer to your questions  
+– Accurate in identifying vulnerable code?  Yes – there simply is no low-level call at all, so there’s nothing to check.  
+– Clear in explaining the attack vector?  Yes – the only vector is short-address, not reentrancy or unchecked calls.  
+– Complete in describing conditions for exploitation?  Yes – you would need malformed calldata of the wrong length, and the `onlyPayloadSize` modifier blocks it.
+
+This ERC-20 implementation is not vulnerable to unchecked low-level calls; it was mis-classified. The real—and mitigated—concern was the short-address attack.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.15;
+
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+
+  using SafeMath for uint256;
+
+  modifier onlyPayloadSize(uint size) {
+    assert(msg.data.length == size + 4);
+    _;
+  }
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) onlyPayloadSize(2 * 32) returns (bool) {
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+}
+
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_to] = balances[_to].add(_value);
+    balances[_from] = balances[_from].sub(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+ 
+```
+
+**Security Analysis:**
+Here’s a tightened, end-to-end explanation of what’s going on, why it’s exploitable, and how to fix it:
+
+1. Vulnerable Pattern  
+   • The contract’s withdrawal function does roughly this:  
+     a) (success, ) = user.call{value: amount}("")  
+     b) require(success)  
+     c) balances[user] -= amount  
+   • Because the external call happens before the balance is updated, a malicious user contract can reenter in its fallback/receive, call withdraw() again, and drain funds repeatedly.
+
+2. Why It’s Exploitable  
+   • Checks-Effects-Interactions Broken – The “effect” (updating the user’s balance) comes after the “interaction” (sending ETH).  
+   • No Reentrancy Guard – There’s nothing (mutex or ReentrancyGuard modifier) preventing recursive calls to withdraw().  
+   • Attacker Flow:  
+     1. Attacker deposits some ETH into the victim contract.  
+     2. Attacker calls withdraw(); funds get sent via call()  
+     3. In the attacker contract’s fallback, it immediately calls withdraw() again (balance is still unchanged)  
+     4. This loops until the contract’s balance is drained or runs out of gas.
+
+3. Conditions for Exploitation  
+   • The function must be payable and callable by arbitrary users.  
+   • It uses a low-level call/send/transfer to a user-controlled address.  
+   • State (user balance) isn’t updated until after that call.  
+   • No mutex/reentrancy guard is in place.
+
+4. Recommended Fixes  
+   Option A – Checks-Effects-Interactions:  
+     • Move the balance update before the external call:  
+       balances[user] -= amount;  
+       (success, ) = user.call{value: amount}("");  
+       require(success);  
+   Option B – ReentrancyGuard:  
+     • Inherit OpenZeppelin’s ReentrancyGuard and add the nonReentrant modifier to withdraw().  
+   Option C – Pull-over-Push Pattern:  
+     • Rather than calling user.call immediately, credit a withdrawal queue and let users pull via a separate function that has the correct order of checks, effects, and interactions.
+
+5. Conclusion  
+
+By applying the standard “checks-effects-interactions” pattern or a reentrancy mutex, you fully block the recursive drain.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.17;
+
+
+
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+
+  using SafeMath for uint256;
+
+  modifier onlyPayloadSize(uint size) {
+    assert(msg.data.length == size + 4);
+    _;
+  }
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) onlyPayloadSize(2 * 32) returns (bool) {
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+}
+
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_to] = balances[_to].add(_value);
+    balances[_from] = balances[_from].sub(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+Here is a concise, step-by-step refutation of the “unchecked_low_level_calls” finding on your ERC-20 snippet, together with confirmation that your analysis is accurate, clear, and complete.
+
+1. What “unchecked low‐level calls” actually means  
+   • In Solidity, low-level calls are things like:  
+     – address.call(...)  
+     – address.delegatecall(...)  
+     – address.staticcall(...)  
+     – address.send(...) or address.transfer(...)  
+   • If you invoke any of those and do _not_ test the returned `bool success`, you risk silent failures: the call can fail and the remainder of your code will continue as if nothing went wrong.
+
+2. Your token code makes _no_ such calls  
+   • All state changes are internal: you use SafeMath for arithmetic and you read/write your own `balances` and `allowed` mappings.  
+   • Your external interactions are standard public or external function calls (e.g. `transfer(...)` or `approve(...)`)—these use Solidity’s normal dispatch mechanism, which bubbles up and reverts on any failure.  
+   • Event emissions (`Transfer(...)`, `Approval(...)`) are logging operations, not low-level calls.
+
+3. There is therefore nothing to “check”  
+   • A genuine “unchecked low-level call” warning only makes sense if you have code like:  
+       someAddr.call(...);  
+     without doing  
+       require(success);  
+   • Since your code never uses `.call`, `.delegatecall`, `.staticcall`, `.send`, or `.transfer`, you cannot introduce that class of bug.  
+
+4. Why some scanners get confused  
+   • Your fragment contains a modifier named `onlyPayloadSize` that does `assert(msg.data.length == …)`. Some tools see the word “low” in “payload size” and mis-tag it as a “low‐level call” issue.  
+   • In reality, you’re simply checking the size of the incoming calldata to prevent a common short-address attack. That is a safe, internal assertion and has nothing to do with low-level `.call` or with unchecked return values.
+
+Conclusion  
+– Your original analysis was entirely accurate.  
+– The scanner’s “unchecked_low_level_calls” flag is a false positive in this context.  
+– No external call is made without checking its result, because no low-level calls are present.  
+– There is zero risk of a silent‐failure Ether‐send or delegatecall in BasicToken/StandardToken as written.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 4: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.17;
+
+
+
+/**
+ *
+ *
+ *
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) constant returns (uint256);
+  function transfer(address to, uint256 value) returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) returns (bool);
+  function approve(address spender, uint256 value) returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+
+}
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+
+  using SafeMath for uint256;
+
+  modifier onlyPayloadSize(uint size) {
+    assert(msg.data.length == size + 4);
+    _;
+  }
+
+  mapping(address => uint256) balances;
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) onlyPayloadSize(2 * 32) returns (bool) {
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+}
+
+/**
+ *
+ *
+ *
+ *
+ *
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) allowed;
+
+  /**
+   *
+   *
+   *
+   *
+   */
+  function transferFrom(address _from, address _to, uint256 _value) returns (bool) {
+    var _allowance = allowed[_from][msg.sender];
+
+    // Check is not needed because sub(_allowance, _value) will already throw if this condition is not met
+    // require (_value <= _allowance);
+
+    balances[_to] = balances[_to].add(_value);
+    balances[_from] = balances[_from].sub(_value);
+    allowed[_from][msg.sender] = _allowance.sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+Here’s the bottom-line:
+
+1. No external calls  
+   • Neither `BasicToken.transfer` nor `StandardToken.transferFrom` invokes `call`, `send`, `transfer` or any other user-supplied code.  
+   • Emitting a `Transfer` event does not execute external code and cannot trigger reentrancy.
+
+2. State updated first  
+   • Both functions subtract from the sender, add to the recipient (and in `transferFrom` also adjust the allowance) before emitting the event.  
+   • There is no window in which untrusted code can observe outdated balances and reenter.
+
+3. SafeMath guarantees safety  
+   • All additions and subtractions use SafeMath, so any underflow/overflow reverts immediately—no silent errors.
+
+Reentrancy requires:
+- An external call into a (possibly malicious) contract  
+- That call happening before you’ve put your contract into a safe state  
+
+Since this ERC-20 snippet does neither, it is not reentrant.  
+
+– Accuracy: We correctly identify that there is no external interaction to exploit.  
+– Clarity: We’ve shown exactly what a reentrancy bug looks like and why it cannot occur here.  
+– Completeness: We’ve covered state update order, SafeMath protections, and the nature of events.  
+
+This code is safe against reentrancy.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 5: DENIAL_OF_SERVICE VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.22;
+
+/**
+ *
+ *
+ * See https://github.com/ethereum/EIPs/issues/179
+ */
+contract ERC20Basic {
+  function totalSupply() public view returns (uint256);
+  function balanceOf(address who) public view returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+/**
+ *
+ *
+ */
+library SafeMath {
+
+  /**
+  *
+  */
+  function mul(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    // Gas optimization: this is cheaper than asserting 'a' not being zero, but the
+    // benefit is lost if 'b' is also tested.
+    // See: https://github.com/OpenZeppelin/openzeppelin-solidity/pull/522
+    if (a == 0) {
+      return 0;
+    }
+
+    c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+  /**
+  *
+  */
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    // uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return a / b;
+  }
+
+  /**
+  *
+  */
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  /**
+  *
+  */
+  function add(uint256 a, uint256 b) internal pure returns (uint256 c) {
+    c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+/**
+ *
+ *
+ */
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+  uint256 totalSupply_;
+
+  /**
+  *
+  */
+  function totalSupply() public view returns (uint256) {
+    return totalSupply_;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function transfer(address _to, uint256 _value) public returns (bool) {
+    require(_to != address(0));
+    require(_value <= balances[msg.sender]);
+
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    emit Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  *
+  *
+  *
+  */
+  function balanceOf(address _owner) public view returns (uint256) {
+    return balances[_owner];
+  }
+
+}
+
+/**
+ *
+ *
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender)
+    public view returns (uint256);
+
+  function transferFrom(address from, address to, uint256 value)
+    public returns (bool);
+
+  function approve(address spender, uint256 value) public returns (bool);
+  event Approval(
+    address indexed owner,
+    address indexed spender,
+    uint256 value
+  );
+}
+
+/**
+ *
+ *
+ *
+ * https://github.com/ethereum/EIPs/issues/20
+ * Based on code by FirstBlood: https://github.com/Firstbloodio/token/blob/master/smart_contract/FirstBloodToken.sol
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) internal allowed;
+
+
+  /**
+   *
+   *
+   *
+   *
+```
+
+**Security Analysis:**
+This code contains a denial_of_service vulnerability.
+
+Below is a concise, accurate and complete summary of the issue, the attack vector, the enabling conditions, and the recommended mitigations.
+
+1) The Vulnerable Pattern  
+   • In your crowdsale/airdrop/refund function you loop over a list of user‐supplied addresses and do something like:  
+     token.transfer(recipients[i], amounts[i]);  
+     or  
+     investors[i].transfer(refundAmounts[i]);  
+   • There is no per‐call error handling—if any single transfer reverts, the entire transaction (and all prior successful‐looking iterations) is rolled back.
+
+2) How an Attacker Exploits It  
+   • The attacker ensures a “bad” address ends up in your recipients/investors array. That can be as simple as registering an address you then include in your batch.  
+   • That bad address can be:  
+     – address(0), which your StandardToken’s require(_to != 0x0) will reject  
+     – a contract whose fallback or token‐receive hook always reverts  
+   • As soon as your loop reaches that entry the transfer call reverts, unwinding the entire state of the batch. No one gets tokens or ETH, and you must redeploy or otherwise intervene manually to resume distributions. This is a classic Denial–of–Service.
+
+3) Why This Is Possible  
+   a) You accept or build a list of recipients from untrusted input.  
+   b) Inside a single transaction you perform external calls (token.transfer or .transfer for ETH) in a tight loop.  
+   c) Solidity (pre-0.6.x) has no built-in try/catch, so any revert bubbles all the way out and aborts the loop.  
+   d) You neither filter/validate addresses nor offer a user-driven pull mechanism.
+
+4) Recommended Mitigations  
+   • Switch to the Pull‐Over‐Push Pattern  
+     – Instead of sending tokens/ETH to everyone in one go, record each user’s entitlement in a mapping and let them call withdraw().  
+     – If one user’s withdraw() ever reverts, only that user is affected—others can still claim.  
+   • Validate Your Recipients List  
+     – Reject address(0) and any known non‐compliant contracts up front.  
+     – If you must batch‐send, filter your list to EOA or audited receivers.  
+   • Per‐Transmission Error Handling  
+     – Track success/failure of each transfer, log failures, and continue the loop instead of letting a single revert kill everything. (In modern Solidity you can use try/catch around low-level calls or interfaces.)  
+
+By avoiding un-sanitized push loops and adopting pull payments (or at least per‐call error handling), you eliminate the single-bad‐address Denial–of–Service vector entirely.
+
+
+**Classification**: This code contains a **denial_of_service** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.16;
+
+/**
+ * @title SafeMath
+ * @dev Math operations with safety checks that throw on error
+ */
+library SafeMath {
+  function mul(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a * b;
+    require(a == 0 || c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal constant returns (uint256) {
+    // require(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // require(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal constant returns (uint256) {
+    require(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal constant returns (uint256) {
+    uint256 c = a + b;
+    require(c >= a);
+    return c;
+  }
+}
+
+/**
+ * @title ERC20Basic
+ * @dev Simpler version of ERC20 interface
+ * @dev see https://github.com/ethereum/EIPs/issues/179
+ */
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) public constant returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+/**
+ * @title Basic token
+ * @dev Basic version of StandardToken, with no allowances.
+ */
+contract BasicToken is ERC20Basic {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) balances;
+
+  /**
+  * @dev transfer token for a specified address
+  * @param _to The address to transfer to.
+  * @param _value The amount to be transferred.
+  */
+  function transfer(address _to, uint256 _value) public returns (bool) {
+    require(_to != address(0));
+    require(_value > 0 && _value <= balances[msg.sender]);
+
+    // SafeMath.sub will throw if there is not enough balance.
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+  /**
+  * @dev Gets the balance of the specified address.
+  * @param _owner The address to query the the balance of.
+  * @return An uint256 representing the amount owned by the passed address.
+  */
+  function balanceOf(address _owner) public constant returns (uint256 balance) {
+    return balances[_owner];
+  }
+}
+
+/**
+ * @title ERC20 interface
+ * @dev see https://github.com/ethereum/EIPs/issues/20
+ */
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) public constant returns (uint256);
+  function transferFrom(address from, address to, uint256 value) public returns (bool);
+  function approve(address spender, uint256 value) public returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+/**
+ * @title Standard ERC20 token
+ *
+ * @dev Implementation of the basic standard token.
+ * @dev https://github.com/ethereum/EIPs/issues/20
+ * @dev Based on code by FirstBlood: https://github.com/Firstbloodio/token/blob/master/smart_contract/FirstBloodToken.sol
+ */
+contract StandardToken is ERC20, BasicToken {
+
+  mapping (address => mapping (address => uint256)) internal allowed;
+
+  /**
+   * @dev Transfer tokens from one address to another
+   * @param _from address The address which you want to send tokens from
+   * @param _to address The address which you want to transfer to
+   * @param _value uint256 the amount of tokens to be transferred
+   */
+  function transferFrom(address _from, address _to, uint256 _value) public returns (bool) {
+    require(_to != address(0));
+    require(_value > 0 && _value <= balances[_from]);
+    require(_value <= allowed[_from][msg.sender]);
+
+    balances[_from] = balances[_from].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    allowed[_from][msg.sender] = allowed[_from][msg.sender].sub(_value);
+    Transfer(_from, _to, _value);
+    return true;
+  }
+
+  /**
+   * @dev Approve the passed address to spend the specified amount of tokens on behalf of msg.sender.
+   *
+   * Beware that changing an allowance with this method brings the risk that someone may use both the old
+   * and the new allowance by unfortunate transaction ordering. One possible solution to mitigate this
+   * race condition is to first reduce the spender's allowance to 0 and set the desired value afterwards:
+   * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+   * @param _spender The address which will spend the funds.
+   * @param _value The amount of tokens to be spent.
+   */
+  function approve(address _spender, uint256 _value) public returns (bool) {
+    allowed[msg.sender][_spender] = _value;
+    Approval(msg.sender, _spender, _value);
+    return true;
+  }
+
+  /**
+   * @dev Function to check the amount of tokens that an owner allowed to a spender.
+   * @param _owner address The address which owns the funds.
+   * @param _spender address The address which will spend the funds.
+   * @return A uint256 specifying the amount of tokens still available for the spender.
+   */
+  function allowance(address _owner, address _spender) public constant returns (uint256 remaining) {
+    return allowed[_owner][_spender];
+  }
+}
+
+/**
+ * @title Ownable
+ * @dev The Ownable contract has an owner address, and provides basic authorization control
+ * functions, this simplifies the implementation of "user permissions".
+ */
+contract Ownable {
+  address public owner;
+
+  event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+  /**
+   * @dev The Ownable constructor sets the original `owner` of the contract to the sender
+   * account.
+   */
+  function Ownable() {
+    owner = msg.sender;
+  }
+
+  /**
+   * @dev Throws if called by any account other than the owner.
+   */
+  modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+  }
+
+  /**
+   * @dev Allows the current owner to transfer control of the contract to a newOwner.
+   * @param newOwner The address to transfer ownership to.
+   */
+  function transferOwnership(address newOwner) onlyOwner public {
+    require(newOwner != address(0));
+    OwnershipTransferred(owner, newOwner);
+    owner = newOwner;
+  }
+
+}
+
+/**
+ * @title Pausable
+ * @dev Base contract which allows children to implement an emergency stop mechanism.
+ */
+contract Pausable is Ownable {
+  event Pause();
+  event Unpause();
+
+  bool public paused = false;
+
+  /**
+   * @dev Modifier to make a function callable only when the contract is not paused.
+   */
+  modifier whenNotPaused() {
+    require(!paused);
+    _;
+  }
+
+  /**
+   * @dev Modifier to make a function callable only when the contract is paused.
+   */
+  modifier whenPaused() {
+    require(paused);
+    _;
+  }
+
+  /**
+   * @dev called by the owner to pause, triggers stopped state
+   */
+  function pause() onlyOwner whenNotPaused public {
+    paused = true;
+    Pause();
+  }
+
+  /**
+   * @dev called by the owner to unpause, returns to normal state
+   */
+  function unpause() onlyOwner whenPaused public {
+    paused = false;
+    Unpause();
+  }
+}
+
+/**
+ * @title Pausable token
+ *
+ * @dev StandardToken modified with pausable transfers.
+ **/
+
+contract PausableToken is StandardToken, Pausable {
+
+  function transfer(address _to, uint256 _value) public whenNotPaused returns (bool) {
+    return super.transfer(_to, _value);
+  }
+
+  function transferFrom(address _from, address _to, uint256 _value) public whenNotPaused returns (bool) {
+    return super.transferFrom(_from, _to, _value);
+  }
+
+  function approve(address _spender, uint256 _value) public whenNotPaused returns (bool) {
+    return super.approve(_spender, _value);
+  }
+
+  function batchTransfer(address[] _receivers, uint256 _value) public whenNotPaused returns (bool) {
+    uint cnt = _receivers.length;
+    
+    uint256 amount = uint256(cnt) * _value;
+    require(cnt > 0 && cnt <= 20);
+    require(_value > 0 && balances[msg.sender] >= amount);
+
+    balances[msg.sender] = balances[msg.sender].sub(amount);
+    for (uint i = 0; i < cnt; i++) {
+        balances[_receivers[i]] = balances[_receivers[i]].add(_value);
+        Transfer(msg.sender, _receivers[i], _value);
+    }
+    return true;
+  }
+}
+
+/**
+ * @title Bec Token
+ *
+ * @dev Implementation of Bec Token based on the basic standard token.
+ */
+contract BecToken is PausableToken {
+    /**
+    * Public variables of the token
+    * The following variables are OPTIONAL vanities. One does not have to include them.
+    * They allow one to customise the token contract & in no way influences the core functionality.
+    * Some wallets/interfaces might not even bother to look at this information.
+    */
+    string public name = "BeautyChain";
+    string public symbol = "BEC";
+    string public version = '1.0.0';
+    uint8 public decimals = 18;
+
+    /**
+     * @dev Function to check the amount of tokens that an owner allowed to a spender.
+     */
+    function BecToken() {
+      totalSupply = 7000000000 * (10**(uint256(decimals)));
+      balances[msg.sender] = totalSupply;    // Give the creator all initial tokens
+    }
+
+    function () {
+        //if ether is sent to this address, send it back.
+        revert();
+    }
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 4 (reentrancy)?
+- Does it have patterns similar to Example 5 (denial_of_service)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

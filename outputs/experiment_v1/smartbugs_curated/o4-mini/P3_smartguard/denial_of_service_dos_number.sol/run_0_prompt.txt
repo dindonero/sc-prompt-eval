@@ -1,0 +1,768 @@
+## SMART CONTRACT SECURITY AUDIT WITH LEARNED EXAMPLES
+
+You are a security auditor specializing in Solidity smart contracts. Below are examples of vulnerable contracts with detailed security analysis. **Learn from these examples** to analyze the target contract.
+
+---
+
+## IN-CONTEXT LEARNING EXAMPLES
+
+The following are examples of real vulnerabilities with expert analysis. Study how the vulnerabilities are identified and explained, then apply the same analytical approach to the target contract.
+
+### EXAMPLE 1: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+contract Accrual_account
+{
+    address admin = msg.sender;
+   
+    uint targetAmount = 1 ether;
+    
+    mapping(address => uint) public investors;
+   
+    event FundsMove(uint amount,bytes32 typeAct,address adr);
+    
+    function changeAdmin(address _new)
+    {
+        if(_new==0x0)throw;
+        if(msg.sender!=admin)throw;
+        admin=_new;
+    }
+    
+    function FundTransfer(uint _am, bytes32 _operation, address _to, address _feeToAdr) 
+    payable
+    {
+       if(msg.sender != address(this)) throw;
+       if(_operation=="In")
+       {
+           FundsMove(msg.value,"In",_to);
+           investors[_to] += _am;
+       }
+       else
+       {
+           uint amTotransfer = 0;
+           if(_to==_feeToAdr)
+           {
+               amTotransfer=_am;
+           }
+           else
+           {
+               amTotransfer=_am/100*99;
+               investors[_feeToAdr]+=_am-amTotransfer;
+           }
+           if(_to.call.value(_am)()==false)throw;
+           investors[_to] -= _am;
+           FundsMove(_am, "Out", _to);
+       }
+    }
+    
+    function()
+    payable
+    {
+       In(msg.sender);
+    }
+    
+    function Out(uint amount) 
+    payable
+    {
+        if(investors[msg.sender]<targetAmount)throw;
+        if(investors[msg.sender]<amount)throw;
+        this.FundTransfer(amount,"",msg.sender,admin);
+    }
+    
+    function In(address to)
+    payable
+    {
+        if(to==0x0)to = admin;
+        if(msg.sender!=tx.origin)throw;
+        this.FundTransfer(msg.value, "In", to,admin);
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+Your analysis is spot‐on. The contract’s use of a low-level call to transfer Ether—and updating its balance state only after that call—creates a classic re-entrancy hole, which is exactly the “unchecked_low_level_calls” issue flagged by static analyzers.
+
+Refined Explanation
+
+1) Vulnerable Pattern  
+   • Ether is sent via `_to.call.value(_am)()`  
+   • `.call.value(...)()` forwards all remaining gas to the recipient’s fallback  
+   • The contract subtracts the user’s balance *after* making this call
+
+2) Why It’s Dangerous  
+   • Full gas stipend means the recipient can run any code, including re-entering your contract  
+   • Because you haven’t yet reduced the sender’s recorded balance, a re-entrant call sees the old balance and passes the withdrawal check again  
+   • Re-entrancy drains more funds than the user originally had deposited
+
+3) Exploit Walk-Through  
+   Setup  
+     – Attacker deploys a malicious contract whose fallback invokes `Accrual_account.Out(...)`  
+     – Attacker deposits sufficient Ether so `investors[attacker] ≥ targetAmount`  
+   Attack Flow  
+     1. Attacker calls `Accrual_account.Out(amount)`  
+     2. Contract enters `FundTransfer` and executes `_to.call.value(amount)()`  
+     3. Malicious fallback receives Ether, immediately calls `Out(amount)` again  
+     4. Since the balance wasn’t yet decremented, the withdrawal check still passes  
+     5. Steps 2–4 repeat until the contract’s funds are drained or gas runs out
+
+4) The Fix (Checks-Effects-Interactions)  
+   • Check: verify the user’s balance is sufficient  
+   • Effects: subtract the amount from the user’s balance  
+   • Interactions: transfer Ether using a safe method (`.transfer(...)` or a low-gas `.call{value:…}("")`) only after updating state
+
+By following that pattern, you prevent re-entrant calls from pulling more funds than permitted and eliminate the unchecked low-level call vulnerability.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 2: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+contract Accrual_account
+{
+    address admin = msg.sender;
+   
+    uint targetAmount = 1 ether;
+    
+    mapping(address => uint) public investors;
+   
+    event FundsMove(uint amount,bytes32 typeAct,address adr);
+    
+    function changeAdmin(address _new)
+    {
+        if(_new==0x0)throw;
+        if(msg.sender!=admin)throw;
+        admin=_new;
+    }
+    
+    function FundTransfer(uint _am, bytes32 _operation, address _to, address _feeToAdr) 
+    payable
+    {
+       if(msg.sender != address(this)) throw;
+       if(_operation=="In")
+       {
+           FundsMove(msg.value,"In",_to);
+           investors[_to] += _am;
+       }
+       else
+       {
+           uint amTotransfer = 0;
+           if(_to==_feeToAdr)
+           {
+               amTotransfer=_am;
+           }
+           else
+           {
+               amTotransfer=_am/100*99;
+               investors[_feeToAdr]+=_am-amTotransfer;
+           }
+           if(_to.call.value(_am)()==false)throw;
+           investors[_to] -= _am;
+           FundsMove(_am, "Out", _to);
+       }
+    }
+    
+    function()
+    payable
+    {
+       In(msg.sender);
+    }
+    
+    function Out(uint amount) 
+    payable
+    {
+        if(investors[msg.sender]<targetAmount)throw;
+        if(investors[msg.sender]<amount)throw;
+        this.FundTransfer(amount,"",msg.sender,admin);
+    }
+    
+    function In(address to)
+    payable
+    {
+        if(to==0x0)to = admin;
+        if(msg.sender!=tx.origin)throw;
+        this.FundTransfer(msg.value, "In", to,admin);
+    }
+    
+    
+}
+```
+
+**Security Analysis:**
+Final Refined Explanation
+
+1. What the contract is intended to do  
+   • Maintain a mapping investors that tracks each address’s deposited balance.  
+   • Allow withdrawals only if the caller’s balance and the global targetAmount (1 ETH) are both met.  
+   • On each withdrawal, collect a 1% fee and credit it to the admin’s balance.  
+   • Allow the admin address to be changed.  
+   • Emit a FundsMove event on every deposit (“In”) and withdrawal (“Out”).
+
+2. Key functions and flow for withdrawals  
+   a) User calls Out(amount).  
+   b) The contract checks  
+      – investors[msg.sender] ≥ targetAmount (1 ETH)  
+      – investors[msg.sender] ≥ amount  
+   c) It then invokes this.FundTransfer(amount, false, msg.sender, admin).  
+   d) In FundTransfer, because _in==false:  
+      1. Compute fee = amount/100 and net = amount – fee.  
+      2. Credit investors[admin] += fee.  
+      3. External call: msg.sender.call.value(amount)()  ← sends the full amount.  
+      4. Only after the call, subtract investors[msg.sender] -= amount.  
+      5. Emit FundsMove event.
+
+3. The reentrancy vulnerability  
+   • The external .call.value(...) is made before the contract updates the caller’s balance.  
+   • A malicious recipient’s fallback or receive function can reenter Out (or FundTransfer) while their original balance is still intact.  
+   • Because the check investors[msg.sender] >= amount still passes, the attacker can repeat withdrawals in a single transaction loop, draining the contract’s funds.
+
+4. Conditions for exploitation  
+   • The attacker must first deposit at least 1 ETH to meet the targetAmount threshold.  
+   • They then trigger Out(…) which leads to the external .call.  
+   • In their fallback, they reenter Out(…) again and again, siphoning off Ether beyond their rightful balance.
+
+5. Impact and severity  
+   • The contract can be completely drained by a single attacker who meets the deposit threshold.  
+   • High-severity reentrancy flaw, since state is updated after the external call.
+
+6. Mitigations  
+   • Follow the Checks-Effects-Interactions pattern: update the investor’s balance before making any external call.  
+   • Use Solidity’s transfer() or send() instead of low-level call.value(), or wrap calls in a reentrancy guard.  
+   • Consider using OpenZeppelin’s ReentrancyGuard to block recursive calls.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 3: UNCHECKED_LOW_LEVEL_CALLS VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity 0.4.24;
+
+contract Token {
+    mapping (address => uint256) public balances;
+    
+    constructor(uint256 _initialSupply) public {
+        balances[msg.sender] = _initialSupply;
+    }
+    
+    function buy() public payable {
+        balances[msg.sender] += msg.value; // in wei 
+    }
+
+    function transfer(address _to, uint256 _value) public {
+        require(balances[msg.sender] >= _value);
+        require(balances[_to] + _value >= balances[_to]);   
+        // Avoid overflows
+        
+        balances[msg.sender] -= _value;
+        balances[_to] += _value;
+    }
+    
+    function withdraw(uint _amount) public {     
+        require(balances[msg.sender] >= _amount);
+        balances[msg.sender] -= _amount;  
+        if(!msg.sender.call.value(_amount)()) {
+            revert();
+        }       
+    }    
+    
+    function getBalance() public view returns (uint) {
+        return address(this).balance;
+    }
+}
+
+```
+
+**Security Analysis:**
+This code contains a unchecked_low_level_calls vulnerability.
+
+Here’s the final, refined explanation—yes, it’s accurate in pinpointing the vulnerable code, clear in laying out the attack, and complete in describing the preconditions.  
+
+1. Vulnerable code pattern  
+   • In Solidity 0.4.x the safest way to send Ether is  
+       – recipient.transfer(amount);  
+       – or if you use send, wrap it in a require: require(recipient.send(amount));  
+   • This contract instead does a low‐level call without checking its return:  
+       function withdraw(uint _amount) public {  
+           require(balances[msg.sender] >= _amount);  
+           balances[msg.sender] -= _amount;            // state updated first  
+           msg.sender.call.value(_amount)();            // low-level call, no return-value check  
+       }  
+
+2. Why this is dangerous  
+   • address.call.value(...)() forwards all remaining gas and catches any revert or out-of-gas inside the callee, returning false instead of bubbling up.  
+   • Because the code never checks that boolean return, it will happily continue—even if the Ether transfer failed.  
+   • State has already been debited, so the user’s balance mapping is reduced but no Ether actually leaves the contract.  
+
+3. Attack outline  
+   1. Attacker deploys a helper contract whose fallback always reverts (or consumes all gas).  
+   2. They call Token.buy() through the helper, funding it with e.g. 5 ETH. Now balances[helper] == 5 ETH.  
+   3. They call Token.withdraw(5 ETH) on the Token contract from their helper.  
+   4. withdraw() does the require, then subtracts 5 ETH from balances, then executes the low‐level call.  
+   5. The helper’s fallback reverts (or runs out of gas), so call.value(...)() returns false—but withdraw() ignores it.  
+   6. withdraw() returns “success,” user balance is zeroed, but the 5 ETH is stuck in the Token contract forever.  
+
+4. Preconditions for exploitation  
+   • Use of address.call.value(...)() for sending Ether  
+   • No check of the boolean return value from call  
+   • State changes (balances[msg.sender] -= amount) occur before the external call  
+
+5. How to fix it  
+   • The simplest, idiomatic fix in Solidity 0.4.x:  
+         function withdraw(uint _amount) public {  
+             require(balances[msg.sender] >= _amount);  
+             balances[msg.sender] -= _amount;  
+             msg.sender.transfer(_amount);       // reverts automatically if it fails  
+         }  
+   • If for some reason you must use .call, do:  
+         (bool ok,) = msg.sender.call.value(_amount)("");  
+         require(ok);                         // revert on failure, so state rollback happens  
+
+By following one of these patterns, you ensure that a failed Ether transfer reverts the entire transaction and prevents users’ on-chain balances from going out of sync with real funds.
+
+
+**Classification**: This code contains a **unchecked_low_level_calls** vulnerability.
+
+---
+
+### EXAMPLE 4: REENTRANCY VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity 0.4.24;
+
+contract Token {
+    mapping (address => uint256) public balances;
+    
+    constructor(uint256 _initialSupply) public {
+        balances[msg.sender] = _initialSupply;
+    }
+    
+    function buy() public payable {
+        balances[msg.sender] += msg.value; // in wei 
+    }
+
+    function transfer(address _to, uint256 _value) public {
+        require(balances[msg.sender] >= _value);
+        require(balances[_to] + _value >= balances[_to]);   
+        // Avoid overflows
+        
+        balances[msg.sender] -= _value;
+        balances[_to] += _value;
+    }
+    
+    function withdraw(uint _amount) public {     
+        require(balances[msg.sender] >= _amount);
+        balances[msg.sender] -= _amount;  
+        if(!msg.sender.call.value(_amount)()) {
+            revert();
+        }       
+    }    
+    
+    function getBalance() public view returns (uint) {
+        return address(this).balance;
+    }
+}
+
+```
+
+**Security Analysis:**
+Here’s a concise, final security summary of the contract:
+
+1. Functionality overview  
+   • Each address has a token balance; 1 token = 1 wei of ETH paid.  
+   • constructor mints an initial token supply to the deployer.  
+   • buy() lets anyone pay ETH and credits their balances[msg.sender] += msg.value.  
+   • transfer() moves tokens between two addresses, checking both underflow (sender) and overflow (recipient).  
+   • withdraw() burns the caller’s tokens (balances[msg.sender] -= amount) then sends them the same amount of ETH via low-level call, reverting on failure.  
+   • getBalance() returns the ETH held by the contract.
+
+2. Vulnerability analysis  
+   • Reentrancy  
+     – withdraw() follows the checks-effects-interactions pattern: it updates state (burns tokens) before doing the external call, so a reentrant call can’t withdraw more than the caller’s balance.  
+   • Arithmetic safety  
+     – transfer() explicitly checks for underflow/overflow.  
+     – buy() uses unchecked addition (balances[msg.sender] += msg.value). In theory a 256-bit overflow is possible if balances[msg.sender] + msg.value ≥ 2^256, but in practice total ETH supply (~2^91 wei) is far below that bound.  
+   • Low-level calls  
+     – withdraw() uses msg.sender.call{value:…}() but checks the returned success flag and reverts if the transfer fails, so funds can’t get stuck in an unknown state.  
+   • Access control / DoS  
+     – All functions are meant to be public. No privileged operations are exposed without control.  
+     – A malicious fallback on msg.sender could block only that address’s withdraw() calls—not the whole contract.
+
+3. Conclusion & recommendations  
+   • No exploitable reentrancy, access-control, or systemic DoS issues were found.  
+   • The only “theoretical” risk is the unchecked addition in buy(), which cannot be reached under real-world ETH supply constraints.  
+   • For maximum safety and to follow best practices, you may wish to adopt a SafeMath library (or Solidity 0.8’s built-in overflow checks) on all arithmetic operations.
+
+
+**Classification**: This code contains a **reentrancy** vulnerability.
+
+---
+
+### EXAMPLE 5: ARITHMETIC VULNERABILITY
+
+**Vulnerable Code:**
+```solidity
+pragma solidity ^0.4.24;
+
+
+library SafeMath {
+
+    
+    function mul(uint256 _a, uint256 _b) internal pure returns (uint256) {
+        
+        
+        
+        if (_a == 0) {
+            return 0;
+        }
+
+        uint256 c = _a * _b;
+        require(c / _a == _b);
+
+        return c;
+    }
+
+    
+    function div(uint256 _a, uint256 _b) internal pure returns (uint256) {
+        require(_b > 0); 
+        uint256 c = _a / _b;
+        
+
+        return c;
+    }
+
+    
+    function sub(uint256 _a, uint256 _b) internal pure returns (uint256) {
+        require(_b <= _a);
+        uint256 c = _a - _b;
+
+        return c;
+    }
+
+    
+    function add(uint256 _a, uint256 _b) internal pure returns (uint256) {
+        uint256 c = _a + _b;
+        require(c >= _a);
+
+        return c;
+    }
+}
+
+
+
+contract Ownable {
+    address public owner;
+
+
+    event OwnershipRenounced(address indexed previousOwner);
+    event OwnershipTransferred(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
+
+
+    
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    
+    function renounceOwnership() public onlyOwner {
+        emit OwnershipRenounced(owner);
+        owner = address(0);
+    }
+
+    
+    function transferOwnership(address _newOwner) public onlyOwner {
+        _transferOwnership(_newOwner);
+    }
+
+    
+    function _transferOwnership(address _newOwner) internal {
+        require(_newOwner != address(0));
+        emit OwnershipTransferred(owner, _newOwner);
+        owner = _newOwner;
+    }
+}
+
+
+contract Pausable is Ownable {
+    event Pause();
+    event Unpause();
+
+    bool public paused = false;
+
+    
+    modifier whenNotPaused() {
+        require(!paused);
+        _;
+    }
+
+    
+    modifier whenPaused() {
+        require(paused);
+        _;
+    }
+
+    
+    function pause() public onlyOwner whenNotPaused {
+        paused = true;
+        emit Pause();
+    }
+
+    
+    function unpause() public onlyOwner whenPaused {
+        paused = false;
+        emit Unpause();
+    }
+}
+
+
+
+contract ERC20 {
+    function totalSupply() public view returns (uint256);
+
+    function balanceOf(address _who) public view returns (uint256);
+
+    function allowance(address _owner, address _spender)
+        public view returns (uint256);
+
+    function transfer(address _to, uint256 _value) public returns (bool);
+
+    function approve(address _spender, uint256 _value)
+        public returns (bool);
+
+    function transferFrom(address _from, address _to, uint256 _value)
+        public returns (bool);
+
+    event Transfer(
+        address indexed from,
+        address indexed to,
+        uint256 value
+    );
+
+    event Approval(
+        address indexed owner,
+        address indexed spender,
+        uint256 value
+    );
+}
+
+
+
+contract StandardToken is ERC20,Pausable {
+    using SafeMath for uint256;
+
+    mapping(address => uint256) balances;
+
+    mapping (address => mapping (address => uint256)) internal allowed;
+
+    uint256 totalSupply_;
+
+    
+    function totalSupply() public view returns (uint256) {
+        return totalSupply_;
+    }
+
+    
+    function balanceOf(address _owner) public view returns (uint256) {
+        return balances[_owner];
+    }
+
+    
+    function allowance(
+        address _owner,
+        address _spender
+    )
+        public
+        view
+        returns (uint256)
+    {
+        return allowed[_owner][_spender];
+    }
+
+    
+    function transfer(address _to, uint256 _value) whenNotPaused public returns (bool) {
+        require(_value <= balances[msg.sender]);
+        require(_to != address(0));
+
+        balances[msg.sender] = balances[msg.sender].sub(_value);
+        balances[_to] = balances[_to].add(_value);
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    
+    function approve(address _spender, uint256 _value) whenNotPaused public returns (bool) {
+        allowed[msg.sender][_spender] = _value;
+        emit 
+```
+
+**Security Analysis:**
+Yes – the root issue is exactly what you’ve described: anywhere you do raw “+=” or “–=” on a uint256 without a check, you open yourself to the 2^256-modulo wrap-around that SafeMath is designed to prevent. Here’s a final, concise explanation:
+
+1) Vulnerable Code Pattern  
+   • Any increment or decrement on a uint256 using the built-in “+” or “-” operators, for example in a mint or balance update:  
+       totalSupply_    += _amount;  
+       balances[_to]   += _amount;  
+     balances[msg.sender] -= _value;  
+   • No accompanying require-style guard (e.g. require(x + y >= x)) and no use of SafeMath.add or SafeMath.sub.
+
+2) Attack Vector  
+   • Overflow mint: choose _amount so that currentTotalSupply + _amount ≥ 2^256.  
+     – EVM wraps it to (currentTotalSupply + _amount) mod 2^256, collapsing totalSupply_ to a small number.  
+     – Attacker can repeat, mint arbitrarily many tokens, or force supply near zero, then rebalance at will.  
+   • Underflow transfer: subtract more than an account’s balance.  
+     – balances[A] = 0; balances[A] -= 1 → wraps to 2^256 − 1, granting a huge balance.
+
+3) Preconditions for Exploitation  
+   • No SafeMath (or explicit require checks) on every arithmetic path.  
+   • No maximum cap on minting.  
+   • Mint (or decrement) function is callable by an attacker (either it’s public or the owner key is compromised).
+
+4) Complete Fix  
+   • Always use SafeMath for additions and subtractions:  
+       totalSupply_ = totalSupply_.add(_amount);  
+       balances[_to] = balances[_to].add(_amount);  
+   • On any subtraction, either use SafeMath.sub (which reverts on underflow) or explicitly require:  
+       require(balances[msg.sender] >= _value, “Insufficient balance”);  
+   • If you have a mint function, enforce an absolute cap and restrict access to a trusted minter/owner.
+
+With these changes in place, you eliminate silent overflow/underflow. SafeMath forces a revert instead of wrapping, so attackers can’t create or destroy tokens out of thin air.
+
+
+**Classification**: This code contains a **arithmetic** vulnerability.
+
+---
+
+
+## TARGET CONTRACT FOR ANALYSIS
+
+Now apply the same analytical approach demonstrated above to this contract:
+
+```solidity
+/*
+ 
+ * @author: -
+ 
+ */
+
+pragma solidity ^0.4.25;
+
+contract DosNumber {
+
+    uint numElements = 0;
+    uint[] array;
+
+    function insertNnumbers(uint value,uint numbers) public {
+
+        // Gas DOS if number > 382 more or less, it depends on actual gas limit
+        
+        for(uint i=0;i<numbers;i++) {
+            if(numElements == array.length) {
+                array.length += 1;
+            }
+            array[numElements++] = value;
+        }
+    }
+
+    function clear() public {
+        require(numElements>1500);
+        numElements = 0;
+    }
+
+    // Gas DOS clear
+    function clearDOS() public {
+
+        // number depends on actual gas limit
+        require(numElements>1500);
+        array = new uint[](0);
+        numElements = 0;
+    }
+
+    function getLengthArray() public view returns(uint) {
+        return numElements;
+    }
+
+    function getRealLengthArray() public view returns(uint) {
+        return array.length;
+    }
+}
+
+```
+
+---
+
+## YOUR ANALYSIS
+
+Following the pattern shown in the examples:
+
+### 1. Contract Overview
+- What is this contract's purpose?
+- What assets does it manage?
+- Who are the intended users?
+
+### 2. Function-by-Function Security Analysis
+For each function, analyze:
+- Access control: Who can call it?
+- State changes: What is modified?
+- External interactions: Any calls to other contracts?
+- Trust assumptions: What must be true for safety?
+
+### 3. Vulnerability Pattern Matching
+Compare the target contract to each example above:
+- Does it have patterns similar to Example 1 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 2 (reentrancy)?
+- Does it have patterns similar to Example 3 (unchecked_low_level_calls)?
+- Does it have patterns similar to Example 4 (reentrancy)?
+- Does it have patterns similar to Example 5 (arithmetic)?
+
+### 4. Evidence Documentation
+For any vulnerability found:
+- Identify exact line numbers
+- Identify the vulnerable function
+- Describe a concrete attack scenario
+- Explain how the vulnerability could be exploited
+
+---
+
+## OUTPUT FORMAT
+
+Provide your findings as a JSON array. Include ONLY vulnerabilities you have high confidence in, with concrete evidence:
+
+```json
+[
+  {
+    "category": "DASP category (reentrancy, access_control, arithmetic, unchecked_low_level_calls, denial_of_service, bad_randomness, front_running, time_manipulation, short_addresses, other)",
+    "title": "Descriptive vulnerability title",
+    "evidence": {
+      "file": "contract.sol",
+      "lines": [line_numbers_where_vulnerability_exists],
+      "function": "vulnerable_function_name"
+    },
+    "explanation": "Clear explanation of the vulnerability and how an attacker could exploit it"
+  }
+]
+```
+
+Return `[]` if no vulnerabilities are found after thorough analysis.
+
+---
+
+Analyze the target contract using the methodology demonstrated in the examples above. Be thorough but precise - only report vulnerabilities you can clearly demonstrate with evidence.

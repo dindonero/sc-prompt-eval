@@ -1,0 +1,134 @@
+## LLM-SmartAudit: TARGETED ANALYSIS (TA) MODE
+
+Reference: Wei et al. 2024 - Buffer-Reasoning Prompt based on Buffer of Thoughts (Figure 2)
+
+This audit uses Buffer-Reasoning prompting with scenario-specific thought templates.
+TA mode divides vulnerability identification into 40 targeted scenarios, each focused
+on a specific vulnerability type, using thought templates from prior problem-solving.
+
+---
+
+## CURRENT SCENARIO: {{ scenario.name }} ({{ scenario.id }})
+
+### Thought Template (Buffer Manager):
+{{ scenario.thought_template }}
+
+---
+
+## SPECIFIED TASK PROMPT:
+
+"Given the user's task and the brainstorming ideas provided:
+Task: \"Determine if the contract is vulnerable to {{ scenario.name }}\"
+Ideas: \"{{ scenario.detection_hints | join(', ') }}\"
+
+As the {{ agent_role | default('Smart Contract Auditor') }}, your primary objective
+is to perform a thorough and detailed inspection of the provided contract code.
+
+**Question: Whether the contract code is vulnerable to {{ scenario.name }}?**
+
+{{ scenario.description }}"
+
+---
+
+## DETECTION GUIDANCE (Thought Retrieval):
+
+Please conduct a thorough analysis, considering the following information:
+
+{% for step in scenario.analysis_steps %}
+{{ loop.index }}. {{ step }}
+{% endfor %}
+
+---
+
+## CONTRACT TO ANALYZE:
+```solidity
+{{ contract_source }}
+```
+
+---
+
+## BUFFER-REASONING METHODOLOGY:
+
+### Step 1: Thought Template Application
+Apply the thought template for {{ scenario.name }} detection:
+{{ scenario.thought_template }}
+
+### Step 2: Pattern Matching
+Search for code patterns that indicate {{ scenario.name }}:
+{% for hint in scenario.detection_hints %}
+- {{ hint }}
+{% endfor %}
+
+### Step 3: Evidence Collection
+For each potential instance found:
+- Record exact line numbers
+- Identify the vulnerable function
+- Document the vulnerable pattern
+
+### Step 4: Exploitability Assessment
+Determine if the vulnerability can be exploited:
+- What are the preconditions?
+- What is the potential impact?
+- Is the severity high enough to report?
+
+---
+
+## STATE MEMORY:
+
+This scenario is part of a systematic 40-scenario analysis.
+{% if state_memory %}
+Previous scenarios checked: {{ state_memory.keys() | list | join(', ') }}
+Vulnerabilities found so far: {{ state_memory.values() | selectattr('found') | list | length }}
+{% endif %}
+
+---
+
+## OUTPUT FORMAT:
+
+**If {{ scenario.name }} vulnerability IS FOUND:**
+
+Respond with: "<INFO> {{ scenario.name }} Identified."
+
+Then provide details:
+
+*{{ scenario.name }}*
+- Category: {{ scenario.dasp_category }}
+- Severity: [Assess: low|medium|high|critical]
+- Confidence: [0.0-1.0 based on evidence strength]
+- Location: [function_name at lines X-Y]
+
+DETAILED DESCRIPTION:
+[Explain what makes this vulnerable to {{ scenario.name }}]
+
+ATTACK SCENARIO:
+[How could an attacker exploit this?]
+
+RECOMMENDED FIX:
+[Specific remediation steps]
+
+```json
+{
+  "category": "{{ scenario.dasp_category }}",
+  "title": "{{ scenario.name }} in [function_name]",
+  "severity": "assessed_severity",
+  "confidence": 0.0-1.0,
+  "evidence": {
+    "file": "contract.sol",
+    "lines": [line_numbers],
+    "function": "function_name"
+  },
+  "explanation": "Detailed explanation",
+  "fix_suggestion": "Recommended fix"
+}
+```
+
+---
+
+**If {{ scenario.name }} vulnerability is NOT FOUND:**
+
+Respond with: "<INFO> NO {{ scenario.name }}."
+
+Briefly explain why the contract is safe from this vulnerability type:
+- What patterns were checked?
+- What protections are in place?
+- Why is exploitation not possible?

@@ -1,0 +1,150 @@
+{
+  "_metadata": {
+    "description": "In-Context Learning (ICL) examples for P2 prompt strategy",
+    "source": "synthetic",
+    "note": "All examples are hand-crafted synthetic code snippets with explicit vulnerability annotations. They are NOT derived from the SmartBugs evaluation dataset. This prevents data leakage between ICL examples and test contracts.",
+    "annotation_format": "<CATEGORY>...</CATEGORY> tags mark vulnerable code regions",
+    "created": "2024-12-30",
+    "train_test_split": "N/A - synthetic examples are independent of evaluation dataset"
+  },
+  "reentrancy": {
+    "description": "Reentrancy occurs when a contract makes an external call before updating its state, allowing the called contract to re-enter and exploit the unchanged state. This can lead to funds being drained through recursive calls.",
+    "examples": [
+      {
+        "code": "contract SimpleDAO {\n    mapping (address => uint) public credit;\n    \n    function donate(address to) payable public {\n        credit[to] += msg.value;\n    }\n    \n    function withdraw(uint amount) public {\n        if (credit[msg.sender] >= amount) {\n            <REENTRANCY>\n            (bool success, ) = msg.sender.call{value: amount}(\"\");\n            require(success);\n            credit[msg.sender] -= amount;\n            </REENTRANCY>\n        }\n    }\n}"
+      },
+      {
+        "code": "contract VulnerableBank {\n    mapping(address => uint256) public balances;\n    \n    function deposit() public payable {\n        balances[msg.sender] += msg.value;\n    }\n    \n    function withdrawAll() public {\n        uint256 bal = balances[msg.sender];\n        require(bal > 0);\n        <REENTRANCY>\n        (bool sent, ) = msg.sender.call{value: bal}(\"\");\n        require(sent, \"Failed to send\");\n        balances[msg.sender] = 0;\n        </REENTRANCY>\n    }\n}"
+      },
+      {
+        "code": "contract EtherStore {\n    mapping(address => uint) public balances;\n    \n    function deposit() public payable {\n        balances[msg.sender] += msg.value;\n    }\n    \n    function withdraw() public {\n        uint bal = balances[msg.sender];\n        require(bal > 0);\n        <REENTRANCY>\n        msg.sender.call{value: bal}(\"\");\n        balances[msg.sender] = 0;\n        </REENTRANCY>\n    }\n}"
+      }
+    ]
+  },
+  "access_control": {
+    "description": "Access control vulnerabilities occur when functions lack proper authorization checks, use tx.origin instead of msg.sender for authentication, or have missing/incorrect modifiers on sensitive operations.",
+    "examples": [
+      {
+        "code": "contract Wallet {\n    address public owner;\n    \n    constructor() {\n        owner = msg.sender;\n    }\n    \n    function transferTo(address to, uint amount) public {\n        <ACCESS_CONTROL>\n        require(tx.origin == owner);\n        </ACCESS_CONTROL>\n        payable(to).transfer(amount);\n    }\n}"
+      },
+      {
+        "code": "contract Treasury {\n    address public owner;\n    \n    constructor() {\n        owner = msg.sender;\n    }\n    \n    <ACCESS_CONTROL>\n    function withdraw(uint amount) public {\n        // Missing onlyOwner modifier\n        payable(msg.sender).transfer(amount);\n    }\n    </ACCESS_CONTROL>\n    \n    function setOwner(address newOwner) public {\n        require(msg.sender == owner);\n        owner = newOwner;\n    }\n}"
+      },
+      {
+        "code": "contract Phishable {\n    address public owner;\n    \n    constructor() {\n        owner = msg.sender;\n    }\n    \n    function withdrawAll(address _recipient) public {\n        <ACCESS_CONTROL>\n        require(tx.origin == owner);\n        </ACCESS_CONTROL>\n        payable(_recipient).transfer(address(this).balance);\n    }\n}"
+      }
+    ]
+  },
+  "arithmetic": {
+    "description": "Arithmetic vulnerabilities include integer overflow and underflow in Solidity versions before 0.8.0 (which lack built-in overflow checks), as well as precision loss from improper ordering of operations.",
+    "examples": [
+      {
+        "code": "// Solidity 0.7.0\npragma solidity ^0.7.0;\n\ncontract Token {\n    mapping(address => uint256) public balances;\n    \n    function transfer(address to, uint256 value) public {\n        <ARITHMETIC>\n        balances[msg.sender] -= value;\n        balances[to] += value;\n        </ARITHMETIC>\n    }\n}"
+      },
+      {
+        "code": "// Solidity 0.6.0\npragma solidity ^0.6.0;\n\ncontract TimeLock {\n    mapping(address => uint) public balances;\n    mapping(address => uint) public lockTime;\n    \n    function increaseLockTime(uint _secondsToIncrease) public {\n        <ARITHMETIC>\n        lockTime[msg.sender] += _secondsToIncrease;\n        </ARITHMETIC>\n    }\n    \n    function withdraw() public {\n        require(balances[msg.sender] > 0);\n        require(block.timestamp > lockTime[msg.sender]);\n        uint amount = balances[msg.sender];\n        balances[msg.sender] = 0;\n        payable(msg.sender).transfer(amount);\n    }\n}"
+      },
+      {
+        "code": "pragma solidity ^0.7.0;\n\ncontract BatchTransfer {\n    mapping(address => uint256) balances;\n    \n    function batchTransfer(address[] memory receivers, uint256 value) public {\n        <ARITHMETIC>\n        uint256 total = receivers.length * value;\n        </ARITHMETIC>\n        require(balances[msg.sender] >= total);\n        balances[msg.sender] -= total;\n        for (uint i = 0; i < receivers.length; i++) {\n            balances[receivers[i]] += value;\n        }\n    }\n}"
+      }
+    ]
+  },
+  "unchecked_low_level_calls": {
+    "description": "Unchecked low-level calls occur when the return value of call, send, or delegatecall is not checked. These functions return false on failure instead of reverting, so ignoring the return value can lead to silent failures.",
+    "examples": [
+      {
+        "code": "contract Lotto {\n    bool public payedOut = false;\n    address public winner;\n    uint public winAmount;\n    \n    function sendToWinner() public {\n        require(!payedOut);\n        <UNCHECKED_LOW_LEVEL_CALLS>\n        payable(winner).send(winAmount);\n        </UNCHECKED_LOW_LEVEL_CALLS>\n        payedOut = true;\n    }\n}"
+      },
+      {
+        "code": "contract Caller {\n    function callExternal(address target, bytes memory data) public {\n        <UNCHECKED_LOW_LEVEL_CALLS>\n        target.call(data);\n        </UNCHECKED_LOW_LEVEL_CALLS>\n    }\n}"
+      },
+      {
+        "code": "contract Refunder {\n    mapping(address => uint) public refunds;\n    \n    function refund(address payable recipient) public {\n        uint amount = refunds[recipient];\n        refunds[recipient] = 0;\n        <UNCHECKED_LOW_LEVEL_CALLS>\n        recipient.send(amount);\n        </UNCHECKED_LOW_LEVEL_CALLS>\n    }\n}"
+      }
+    ]
+  },
+  "denial_of_service": {
+    "description": "Denial of service vulnerabilities allow attackers to make a contract unusable. Common patterns include unbounded loops that can run out of gas, external calls that can fail and block execution, and self-destruct attacks.",
+    "examples": [
+      {
+        "code": "contract Auction {\n    address public highestBidder;\n    uint public highestBid;\n    \n    function bid() public payable {\n        require(msg.value > highestBid);\n        <DENIAL_OF_SERVICE>\n        payable(highestBidder).transfer(highestBid);\n        </DENIAL_OF_SERVICE>\n        highestBidder = msg.sender;\n        highestBid = msg.value;\n    }\n}"
+      },
+      {
+        "code": "contract DistributeTokens {\n    address[] public investors;\n    mapping(address => uint) public investments;\n    \n    function distribute() public {\n        <DENIAL_OF_SERVICE>\n        for (uint i = 0; i < investors.length; i++) {\n            payable(investors[i]).transfer(investments[investors[i]]);\n        }\n        </DENIAL_OF_SERVICE>\n    }\n}"
+      },
+      {
+        "code": "contract KingOfEther {\n    address public king;\n    uint public prize;\n    \n    function claimThrone() external payable {\n        require(msg.value > prize);\n        <DENIAL_OF_SERVICE>\n        payable(king).transfer(prize);\n        </DENIAL_OF_SERVICE>\n        king = msg.sender;\n        prize = msg.value;\n    }\n}"
+      }
+    ]
+  },
+  "bad_randomness": {
+    "description": "Bad randomness vulnerabilities occur when contracts use predictable on-chain values (block.timestamp, blockhash, block.number) as sources of randomness. Miners can manipulate these values to influence outcomes.",
+    "examples": [
+      {
+        "code": "contract Lottery {\n    function pickWinner() public {\n        <BAD_RANDOMNESS>\n        uint winner = uint(keccak256(abi.encodePacked(block.timestamp))) % players.length;\n        </BAD_RANDOMNESS>\n        payable(players[winner]).transfer(address(this).balance);\n    }\n    \n    address[] public players;\n}"
+      },
+      {
+        "code": "contract GuessTheNumber {\n    uint public answer;\n    \n    constructor() payable {\n        <BAD_RANDOMNESS>\n        answer = uint(keccak256(abi.encodePacked(blockhash(block.number - 1), block.timestamp)));\n        </BAD_RANDOMNESS>\n    }\n    \n    function guess(uint n) public payable {\n        require(msg.value >= 1 ether);\n        if (n == answer) {\n            payable(msg.sender).transfer(address(this).balance);\n        }\n    }\n}"
+      },
+      {
+        "code": "contract CoinFlip {\n    uint public consecutiveWins;\n    \n    function flip() public returns (bool) {\n        <BAD_RANDOMNESS>\n        uint blockValue = uint(blockhash(block.number - 1));\n        uint coinFlip = blockValue / 57896044618658097711785492504343953926634992332820282019728792003956564819968;\n        bool side = coinFlip == 1 ? true : false;\n        </BAD_RANDOMNESS>\n        return side;\n    }\n}"
+      }
+    ]
+  },
+  "front_running": {
+    "description": "Front-running vulnerabilities allow attackers to observe pending transactions in the mempool and submit their own transactions with higher gas prices to execute before the victim. This is common in DEX trades, auctions, and name registrations.",
+    "examples": [
+      {
+        "code": "contract FindThisHash {\n    bytes32 public hash = 0x564ccaf7594d66b1eaaea24fe01f0585bf52ee70852af4eac0cc4b04711cd0e2;\n    \n    <FRONT_RUNNING>\n    function solve(string memory solution) public {\n        require(hash == keccak256(abi.encodePacked(solution)));\n        payable(msg.sender).transfer(10 ether);\n    }\n    </FRONT_RUNNING>\n}"
+      },
+      {
+        "code": "contract Auction {\n    address public highestBidder;\n    uint public highestBid;\n    \n    <FRONT_RUNNING>\n    function bid() public payable {\n        require(msg.value > highestBid);\n        highestBidder = msg.sender;\n        highestBid = msg.value;\n    }\n    </FRONT_RUNNING>\n}"
+      },
+      {
+        "code": "contract TokenSale {\n    mapping(address => uint) public balances;\n    uint public price = 1 ether;\n    \n    <FRONT_RUNNING>\n    function buy() public payable {\n        uint tokens = msg.value / price;\n        balances[msg.sender] += tokens;\n    }\n    \n    function setPrice(uint newPrice) public {\n        price = newPrice;\n    }\n    </FRONT_RUNNING>\n}"
+      }
+    ]
+  },
+  "time_manipulation": {
+    "description": "Time manipulation vulnerabilities occur when block.timestamp is used for critical logic. Miners can manipulate the timestamp within a range of about 15 seconds, which can affect time-dependent operations.",
+    "examples": [
+      {
+        "code": "contract TimeBasedLottery {\n    function pickWinner() public {\n        <TIME_MANIPULATION>\n        require(block.timestamp % 2 == 0);\n        </TIME_MANIPULATION>\n        payable(msg.sender).transfer(address(this).balance);\n    }\n}"
+      },
+      {
+        "code": "contract TimeLock {\n    uint public unlockTime;\n    address public owner;\n    \n    constructor() payable {\n        owner = msg.sender;\n        unlockTime = block.timestamp + 1 weeks;\n    }\n    \n    function withdraw() public {\n        require(msg.sender == owner);\n        <TIME_MANIPULATION>\n        require(block.timestamp >= unlockTime);\n        </TIME_MANIPULATION>\n        payable(owner).transfer(address(this).balance);\n    }\n}"
+      },
+      {
+        "code": "contract Vulnerable {\n    uint public prevClaimTime;\n    \n    function claim() public {\n        <TIME_MANIPULATION>\n        require(block.timestamp > prevClaimTime + 1 days);\n        prevClaimTime = block.timestamp;\n        </TIME_MANIPULATION>\n        payable(msg.sender).transfer(1 ether);\n    }\n}"
+      }
+    ]
+  },
+  "short_addresses": {
+    "description": "Short address attacks exploit the EVM's padding behavior when receiving data shorter than expected. If user input is not validated, an attacker can manipulate token transfer amounts by sending addresses shorter than 20 bytes.",
+    "examples": [
+      {
+        "code": "contract Token {\n    mapping(address => uint) public balances;\n    \n    <SHORT_ADDRESSES>\n    function transfer(address to, uint amount) public {\n        // No input length validation\n        require(balances[msg.sender] >= amount);\n        balances[msg.sender] -= amount;\n        balances[to] += amount;\n    }\n    </SHORT_ADDRESSES>\n}"
+      },
+      {
+        "code": "contract VulnerableToken {\n    mapping(address => uint256) balances;\n    \n    <SHORT_ADDRESSES>\n    function transfer(address _to, uint256 _value) public returns (bool) {\n        // Missing: require(msg.data.length >= 68);\n        if (balances[msg.sender] >= _value) {\n            balances[msg.sender] -= _value;\n            balances[_to] += _value;\n            return true;\n        }\n        return false;\n    }\n    </SHORT_ADDRESSES>\n}"
+      },
+      {
+        "code": "contract BasicToken {\n    mapping(address => uint) public balanceOf;\n    \n    <SHORT_ADDRESSES>\n    function transfer(address to, uint value) external {\n        // No msg.data length check\n        balanceOf[msg.sender] -= value;\n        balanceOf[to] += value;\n    }\n    </SHORT_ADDRESSES>\n}"
+      }
+    ]
+  },
+  "other": {
+    "description": "Other vulnerabilities include miscellaneous security issues such as unsafe delegatecall, uninitialized storage pointers, floating pragma versions, and other Solidity-specific pitfalls.",
+    "examples": [
+      {
+        "code": "contract Proxy {\n    address public implementation;\n    \n    function setImplementation(address _impl) public {\n        implementation = _impl;\n    }\n    \n    fallback() external payable {\n        <OTHER>\n        (bool success, ) = implementation.delegatecall(msg.data);\n        require(success);\n        </OTHER>\n    }\n}"
+      },
+      {
+        "code": "<OTHER>\npragma solidity ^0.8.0;\n</OTHER>\n\ncontract FloatingPragma {\n    // Using floating pragma allows different compiler versions\n    // which may introduce inconsistent behavior\n    uint public value;\n    \n    function setValue(uint _value) public {\n        value = _value;\n    }\n}"
+      },
+      {
+        "code": "contract Uninitialized {\n    struct User {\n        uint balance;\n        bool exists;\n    }\n    \n    mapping(uint => User) users;\n    \n    function createUser(uint id) public {\n        <OTHER>\n        User storage user;\n        user.balance = 100;\n        user.exists = true;\n        </OTHER>\n        users[id] = user;\n    }\n}"
+      }
+    ]
+  }
+}
