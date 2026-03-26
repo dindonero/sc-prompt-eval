@@ -273,7 +273,7 @@ def main():
 
     # Load P6
     print("Loading P6 results...")
-    p6_dir = base_dir / "outputs/experiment_v1/smartbugs_curated/iaudit_local/P6_iaudit"
+    p6_dir = output_base / "P6_iaudit"
     p6_runs = load_p6_metrics(p6_dir)
     print(f"  P6: {len(p6_runs)} contracts")
     all_runs.extend(p6_runs)
